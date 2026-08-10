@@ -5,6 +5,8 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.view.View
+import android.widget.AdapterView
 import android.widget.ArrayAdapter
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
@@ -31,6 +33,17 @@ class MainActivity : AppCompatActivity() {
         "USB (USB 網路共享)" to TransportMode.USB_RNDIS,
         "USB (adb)" to TransportMode.USB_ADB,
     )
+
+    /**
+     * transport 引導提示（見 todo08-1）：選到需要手機端先開開關的 transport
+     * 時顯示一行說明文字，純 UI 提示，不影響任何連線/傳輸邏輯。WiFi 沒有
+     * 額外開關需求，不在表中即代表空字串。
+     */
+    private fun transportHintFor(mode: TransportMode): String = when (mode) {
+        TransportMode.USB_RNDIS -> getString(R.string.hint_transport_usb_rndis)
+        TransportMode.USB_ADB -> getString(R.string.hint_transport_usb_adb)
+        else -> ""
+    }
 
     private val notificationPermissionLauncher =
         registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.RequestPermission()) { }
@@ -67,6 +80,14 @@ class MainActivity : AppCompatActivity() {
             android.R.layout.simple_spinner_dropdown_item,
             transportOptions.map { it.first },
         )
+        binding.transportSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                binding.transportHintText.text = transportHintFor(transportOptions[position].second)
+            }
+
+            override fun onNothingSelected(parent: AdapterView<*>?) {}
+        }
+        binding.transportHintText.text = transportHintFor(transportOptions[0].second)
 
         binding.startStopButton.setOnClickListener { onToggleStartStop() }
 

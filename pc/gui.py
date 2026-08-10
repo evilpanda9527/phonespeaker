@@ -34,6 +34,15 @@ TRANSPORT_FACTORIES: dict[str, Callable[[], Transport]] = {
     "USB (adb)": lambda: UsbAdbTransport(),
 }
 
+# 選到某個 transport 時，在下拉選單下方顯示的引導文字，提醒使用者先在手機
+# 開對應的開關。純 UI 提示（見 todo08-1），不影響任何連線/傳輸邏輯；WiFi
+# 沒有額外開關需求，維持空字串。
+TRANSPORT_HINTS: dict[str, str] = {
+    "WiFi": "",
+    "USB (USB 網路共享)": "請先在手機開啟「USB 網路共享 / USB tethering」。",
+    "USB (adb)": "請先在手機開啟「USB 偵錯」（開發者選項）。",
+}
+
 _STATE_LABELS = {
     EngineState.IDLE: "尚未啟動",
     EngineState.WAITING: "等待手機連線…",
@@ -73,7 +82,10 @@ class App(ctk.CTk):
         ctk.CTkLabel(top, text="Transport：").pack(side="left", padx=(4, 4))
         self.transport_var = ctk.StringVar(value=next(iter(TRANSPORT_FACTORIES)))
         self.transport_menu = ctk.CTkOptionMenu(
-            top, values=list(TRANSPORT_FACTORIES), variable=self.transport_var
+            top,
+            values=list(TRANSPORT_FACTORIES),
+            variable=self.transport_var,
+            command=self._on_transport_selected,
         )
         self.transport_menu.pack(side="left", padx=(0, 16))
 
@@ -81,6 +93,22 @@ class App(ctk.CTk):
             top, text="啟動", command=self._on_toggle_start_stop, width=100
         )
         self.start_stop_btn.pack(side="left")
+
+        # transport 引導提示（見 todo08-1）：選到需要手機端先開開關的
+        # transport 時，在下拉選單下方顯示一行不擋流程的說明文字。用粗體
+        # 黃色跟其他一般說明文字（灰色）區隔，讓使用者一眼就注意到（使用者
+        # 反饋：原本的灰色不夠醒目）。淺色模式用較深的琥珀色維持可讀對比，
+        # 深色模式用較亮的金黃色。
+        hint_frame = ctk.CTkFrame(self)
+        hint_frame.pack(fill="x", padx=12, pady=(0, 6))
+        self.transport_hint_label = ctk.CTkLabel(
+            hint_frame,
+            text="",
+            text_color=("#946200", "#FFD54F"),
+            font=ctk.CTkFont(weight="bold"),
+        )
+        self.transport_hint_label.pack(side="left", padx=(4, 4))
+        self._update_transport_hint(self.transport_var.get())
 
         status_frame = ctk.CTkFrame(self)
         status_frame.pack(fill="x", padx=12, pady=6)
@@ -125,6 +153,13 @@ class App(ctk.CTk):
     # ------------------------------------------------------------------ #
     # 事件處理
     # ------------------------------------------------------------------ #
+
+    def _on_transport_selected(self, choice: str) -> None:
+        """下拉選單 command callback：純 UI 提示更新，不動連線邏輯（todo08-1）。"""
+        self._update_transport_hint(choice)
+
+    def _update_transport_hint(self, transport_name: str) -> None:
+        self.transport_hint_label.configure(text=TRANSPORT_HINTS.get(transport_name, ""))
 
     def _on_toggle_start_stop(self) -> None:
         if self._running:

@@ -18,6 +18,11 @@
     <string name="label_status">狀態：</string>
     <string name="label_format">目前音訊格式：</string>
 
+    <!-- transport 引導提示（見 todo08-1）：選到對應 transport 時顯示，
+         提醒使用者先開對應開關。WiFi 不需要提示，程式碼端直接給空字串。 -->
+    <string name="hint_transport_usb_rndis">請先在手機開啟「USB 網路共享 / USB tethering」。</string>
+    <string name="hint_transport_usb_adb">請先在手機開啟「USB 偵錯」（開發者選項）。</string>
+
     <string name="notification_channel_name">PhoneSpeaker 串流</string>
     <string name="notification_title">PhoneSpeaker 正在播放 PC 音訊</string>
     <string name="notification_text_waiting">等待 PC 連線…</string>
