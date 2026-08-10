@@ -50,11 +50,14 @@ class App(ctk.CTk):
 
         self._engine: Optional[StreamEngine] = None
         self._active_transport: Optional[Transport] = None
-        self._log_queue: "queue.Queue[str]" = queue.Queue()
+        # engine 背景執行緒 → 主執行緒的 callback 一律先進這個 queue，
+        # 由主執行緒自己的輪詢迴圈取出執行（見 _threadsafe / _drain_callback_queue，
+        # 修正緣由見 todo07-2）。
+        self._callback_queue: "queue.Queue[tuple[Callable, tuple, dict]]" = queue.Queue()
         self._running = False
 
         self._build_ui()
-        self.after(100, self._drain_log_queue)
+        self.after(100, self._drain_callback_queue)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # ------------------------------------------------------------------ #
@@ -231,10 +234,32 @@ class App(ctk.CTk):
     # ------------------------------------------------------------------ #
 
     def _threadsafe(self, fn: Callable[..., None]) -> Callable[..., None]:
-        """把 engine 背景執行緒的 callback 轉成主執行緒（Tk）安全的呼叫。"""
+        """把 engine 背景執行緒的 callback 轉成主執行緒（Tk）安全的呼叫。
+
+        根因（見 todo07-2 診斷 log）：舊實作在呼叫端（engine 背景執行緒）
+        直接呼叫 `self.after(0, ...)`。tkinter 從非主執行緒呼叫任何 Tk
+        方法（包含 after()）都會被底層 marshal 回主執行緒、並「同步等待」
+        主執行緒的 Tcl event loop 處理完才返回呼叫端——這不是單純排程，是
+        會阻塞呼叫端的跨執行緒呼叫。
+
+        而使用者按停止時，主執行緒正卡在 `engine.stop()` 內的
+        `_engine_thread.join(timeout=5.0)`（見 stream_engine.py），沒有在
+        跑 Tk event loop；這時 engine 執行緒剛好在 `_run()` 收尾呼叫
+        `_set_state(STOPPED)` → on_state_changed → 這裡的 `self.after(0,
+        ...)`，因此卡住等主執行緒把它處理掉——但主執行緒又在 join() 裡等
+        engine 執行緒結束，兩邊互卡，直到 join() 5 秒逾時、主執行緒才脫身
+        繼續跑、engine 執行緒的 after() 呼叫才跟著返回、_run() 才真正結束。
+        這就是診斷 log 顯示「每次停止都精準卡滿 ~5000ms、逾時判定仍存活，
+        但其實幾乎同時就結束了」、以及殭屍 stream-engine 執行緒累積的真因。
+
+        修法：呼叫端只做純 Python 的 `queue.put()`——不呼叫任何 Tk API，
+        GIL 保護下必為 O(1) 非阻塞操作，不會卡呼叫端。真正的 UI 更新留給
+        主執行緒自己的 `self.after(100, self._drain_callback_queue)` 輪詢
+        迴圈自己排程、自己執行，不會再有跨執行緒呼叫 Tk 方法的情況。
+        """
 
         def wrapper(*args, **kwargs) -> None:
-            self.after(0, lambda: fn(*args, **kwargs))
+            self._callback_queue.put((fn, args, kwargs))
 
         return wrapper
 
@@ -244,15 +269,19 @@ class App(ctk.CTk):
         self.log_box.see("end")
         self.log_box.configure(state="disabled")
 
-    def _drain_log_queue(self) -> None:
-        # 保留給未來（logging handler 想把訊息也導進這個 queue 時使用）。
+    def _drain_callback_queue(self) -> None:
+        """主執行緒輪詢迴圈：取出 engine 背景執行緒排進來的 callback 並執行。
+
+        只有這裡（主執行緒自己的 after() 迴圈裡）才真正呼叫 Tk 方法，
+        engine 執行緒那邊只管 put()，兩者之間不會有跨執行緒 Tk 呼叫。
+        """
         while True:
             try:
-                msg = self._log_queue.get_nowait()
+                fn, args, kwargs = self._callback_queue.get_nowait()
             except queue.Empty:
                 break
-            self._append_log(msg)
-        self.after(100, self._drain_log_queue)
+            fn(*args, **kwargs)
+        self.after(100, self._drain_callback_queue)
 
 
 def run() -> None:
