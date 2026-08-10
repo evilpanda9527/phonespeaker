@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import queue
 import threading
+import time
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Callable, Optional
@@ -97,11 +98,39 @@ class StreamEngine:
         self._engine_thread.start()
 
     def stop(self) -> None:
+        # 診斷用（見 todo07-1）：逐段計時，量出「停止」卡在哪一步、卡多久。
+        # 只加 log，不改行為/邏輯——先把真實數字量出來，下一輪再對症修
+        # (a) 反覆啟停累積殭屍執行緒 (b) start() 前應確認舊 engine 執行緒已死。
+        t_stop_start = time.monotonic()
+        logger.info("[停止診斷] stop() 開始")
+
         self._stop_requested.set()
+
+        t0 = time.monotonic()
         self._transport.request_cancel()
+        logger.info(
+            "[停止診斷] transport.request_cancel() 耗時 %.0fms",
+            (time.monotonic() - t0) * 1000,
+        )
+
+        t0 = time.monotonic()
         self._transport.disconnect()
+        logger.info(
+            "[停止診斷] transport.disconnect() 耗時 %.0fms",
+            (time.monotonic() - t0) * 1000,
+        )
+
         if self._engine_thread is not None:
-            self._engine_thread.join(timeout=5.0)
+            join_timeout = 5.0
+            t0 = time.monotonic()
+            self._engine_thread.join(timeout=join_timeout)
+            join_elapsed = time.monotonic() - t0
+            logger.info(
+                "[停止診斷] _engine_thread.join(timeout=%.1fs) 耗時 %.0fms，逾時後仍存活=%s",
+                join_timeout,
+                join_elapsed * 1000,
+                self._engine_thread.is_alive(),
+            )
             if self._engine_thread.is_alive():
                 # 不應該發生（會卡在這裡的兩個已知成因——音訊擷取的阻塞式
                 # read()、transport 送出時卡住的 sendall()——分別在
@@ -124,6 +153,10 @@ class StreamEngine:
             else:
                 self._engine_thread = None
         self._set_state(EngineState.STOPPED)
+        logger.info(
+            "[停止診斷] stop() 總耗時 %.0fms",
+            (time.monotonic() - t_stop_start) * 1000,
+        )
 
     @property
     def state(self) -> EngineState:
@@ -196,8 +229,18 @@ class StreamEngine:
                     break
                 self._log("已斷線，回到等待連線狀態（§3 reconnect）")
         finally:
+            t0 = time.monotonic()
             self._device_monitor.stop()
+            logger.info(
+                "[停止診斷] _run() finally: device_monitor.stop() 耗時 %.0fms",
+                (time.monotonic() - t0) * 1000,
+            )
+            t0 = time.monotonic()
             self._capture.close()
+            logger.info(
+                "[停止診斷] _run() finally: capture.close() 耗時 %.0fms",
+                (time.monotonic() - t0) * 1000,
+            )
             self._set_state(EngineState.STOPPED)
 
     def _do_handshake_and_stream(self) -> None:
@@ -322,9 +365,17 @@ class StreamEngine:
         self._format_dirty.set()
 
     def _teardown_stream(self) -> None:
+        t_teardown_start = time.monotonic()
         self._sender_stop.set()
         if self._sender_thread is not None:
+            t0 = time.monotonic()
             self._sender_thread.join(timeout=2.0)
+            join_elapsed = time.monotonic() - t0
+            logger.info(
+                "[停止診斷] pcm-sender.join(timeout=2.0s) 耗時 %.0fms，逾時後仍存活=%s",
+                join_elapsed * 1000,
+                self._sender_thread.is_alive(),
+            )
             if self._sender_thread.is_alive():
                 # 診斷用：明確指出是 pcm-sender 這個執行緒逾時未結束，不要
                 # 讓呼叫端只看到「整體逾時」卻不知道是哪一個。
@@ -335,6 +386,20 @@ class StreamEngine:
                 )
             else:
                 self._sender_thread = None
+        t0 = time.monotonic()
         self._capture.stop()
+        logger.info(
+            "[停止診斷] _teardown_stream: capture.stop() 耗時 %.0fms",
+            (time.monotonic() - t0) * 1000,
+        )
         if self.auto_mute:
+            t0 = time.monotonic()
             self._mute.restore_output()
+            logger.info(
+                "[停止診斷] _teardown_stream: mute.restore_output() 耗時 %.0fms",
+                (time.monotonic() - t0) * 1000,
+            )
+        logger.info(
+            "[停止診斷] _teardown_stream() 總耗時 %.0fms",
+            (time.monotonic() - t_teardown_start) * 1000,
+        )

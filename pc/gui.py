@@ -10,6 +10,8 @@ from __future__ import annotations
 import logging
 import os
 import queue
+import threading
+import time
 from typing import Callable, Optional
 
 import customtkinter as ctk
@@ -126,6 +128,12 @@ class App(ctk.CTk):
             self._start_engine()
 
     def _start_engine(self) -> None:
+        # 診斷用（見 todo07-1）：只加 log，不改行為/邏輯。啟動新 engine 前先
+        # 印出目前所有背景執行緒，用來觀察「反覆停止→啟動」是否會累積上一輪
+        # 沒有真正結束的殭屍執行緒（例如仍看到多個同名 "audio-capture"、
+        # "device-monitor"、"pcm-sender"、"stream-engine"）。
+        self._log_alive_threads("_start_engine() 啟動前")
+
         transport_name = self.transport_var.get()
         factory = TRANSPORT_FACTORIES[transport_name]
         transport = factory()
@@ -146,8 +154,16 @@ class App(ctk.CTk):
         self._append_log(f"已啟動 {transport_name} transport")
 
     def _stop_engine(self) -> None:
+        # 診斷用（見 todo07-1）：量出「使用者按停止」到「engine.stop() 真的
+        # 返回」的呼叫端總耗時，並在前後都印出背景執行緒清單，方便跟
+        # stream_engine 內部各段的計時 log 對照。只加 log，不改行為/邏輯。
         if self._engine is not None:
+            t0 = time.monotonic()
             self._engine.stop()
+            elapsed = time.monotonic() - t0
+            msg = f"[停止診斷] GUI _stop_engine(): engine.stop() 呼叫端總耗時 {elapsed * 1000:.0f}ms"
+            logger.info(msg)
+            self._append_log(msg)
             self._engine = None
         self._active_transport = None
         self._running = False
@@ -157,6 +173,7 @@ class App(ctk.CTk):
         self.format_label.configure(text="—")
         self.usb_fallback_label.configure(text="")
         self._append_log("已停止")
+        self._log_alive_threads("_stop_engine() 結束後")
 
     def _on_state_changed(self, state: EngineState) -> None:
         self.status_label.configure(text=_STATE_LABELS.get(state, str(state)))
@@ -177,6 +194,23 @@ class App(ctk.CTk):
             self._running = False
             self.start_stop_btn.configure(text="啟動")
             self.transport_menu.configure(state="normal")
+
+    def _log_alive_threads(self, label: str) -> None:
+        """診斷用（見 todo07-1）：印出目前所有非 main 的背景執行緒名稱。
+
+        跨「啟動→停止→再啟動」多輪比對這份清單的數量/名稱，就能看出
+        (a) 是否有上一輪的執行緒沒真的結束就被留下來（殭屍執行緒累積）。
+        只讀 threading.enumerate()、不影響任何執行緒的生命週期。
+        """
+        alive_names = sorted(
+            t.name for t in threading.enumerate() if t is not threading.main_thread()
+        )
+        logger.info(
+            "[停止診斷] %s：目前存活背景執行緒(%d): %s",
+            label,
+            len(alive_names),
+            alive_names,
+        )
 
     def _on_close(self) -> None:
         if self._running:

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from typing import Callable, Optional
 
 import pyaudiowpatch as pyaudio
@@ -147,8 +148,11 @@ class AudioCapture:
                     logger.exception("on_chunk callback 發生例外: %s", e)
 
     def stop(self) -> None:
+        # 診斷用（見 todo07-1）：逐段計時，只加 log，不改行為/邏輯。
+        t_stop_start = time.monotonic()
         self._stop_event.set()
         if self._stream is not None:
+            t0 = time.monotonic()
             try:
                 # 主動中斷：系統無聲時 stream.read() 可能長時間卡在阻塞呼叫
                 # 裡不會自己返回。呼叫 stop_stream() 讓 PortAudio 主動停止這
@@ -158,8 +162,20 @@ class AudioCapture:
                 self._stream.stop_stream()
             except OSError as e:
                 logger.debug("stop_stream() 時發生非致命錯誤: %s", e)
+            logger.info(
+                "[停止診斷] audio_capture: stream.stop_stream() 耗時 %.0fms",
+                (time.monotonic() - t0) * 1000,
+            )
         if self._thread is not None:
+            t0 = time.monotonic()
             self._thread.join(timeout=2.0)
+            join_elapsed = time.monotonic() - t0
+            logger.info(
+                "[停止診斷] audio_capture: audio-capture thread.join(timeout=2.0s) "
+                "耗時 %.0fms，逾時後仍存活=%s",
+                join_elapsed * 1000,
+                self._thread.is_alive(),
+            )
             if self._thread.is_alive():
                 # 保險：stop_stream() 理論上已經能喚醒卡住的 read()，這裡
                 # 只是防呆——執行緒真的還沒結束就絕對不能往下呼叫
@@ -171,6 +187,10 @@ class AudioCapture:
                 )
                 return
             self._thread = None
+        logger.info(
+            "[停止診斷] audio_capture.stop() 總耗時 %.0fms",
+            (time.monotonic() - t_stop_start) * 1000,
+        )
 
     def close_stream(self) -> None:
         self.stop()

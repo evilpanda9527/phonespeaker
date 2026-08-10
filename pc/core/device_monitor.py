@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from typing import Callable, Optional
 
 import comtypes
@@ -112,8 +113,19 @@ class DeviceMonitor:
             comtypes.CoUninitialize()
 
     def stop(self) -> None:
+        # 診斷用（見 todo07-1）：只加計時/存活 log，不改行為/邏輯——這裡原本
+        # 就沒有 is_alive() 判斷、逾時後也直接把 self._thread 設回 None，
+        # 這次先不動這段行為，只讓「逾時後其實還活著」這件事在 log 裡看得到
+        # （這可能正是 (a) 殭屍執行緒累積的來源之一，下一輪再對症修）。
         if self._thread is None:
             return
         self._stop_event.set()
+        t0 = time.monotonic()
         self._thread.join(timeout=3.0)
+        join_elapsed = time.monotonic() - t0
+        logger.info(
+            "[停止診斷] device_monitor: thread.join(timeout=3.0s) 耗時 %.0fms，逾時後仍存活=%s",
+            join_elapsed * 1000,
+            self._thread.is_alive(),
+        )
         self._thread = None
