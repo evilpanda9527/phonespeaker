@@ -6,8 +6,10 @@ import kotlin.math.ceil
 import kotlin.math.max
 
 /**
- * RingBuffer.kt — PCM chunk 緩衝（§9：target 20–60ms，underrun 補最短靜音、
- * 不 crash、無無限 queue）。
+ * RingBuffer.kt — PCM chunk 緩衝（§9：target 20–60ms，必要時到 100ms，underrun
+ * 補最短靜音、不 crash、無無限 queue）。target 值依 transport 不同而不同，見
+ * StreamerService.ringBufferTargetMsFor()；這裡本身不知道、也不需要知道是哪個
+ * transport。
  *
  * 用有界的 chunk queue 實作（不是逐 byte 的環形緩衝）：網路收到的每個 PCM
  * frame 就是一個 chunk，整包放進 queue；播放執行緒（AudioPlayer）從這裡
@@ -59,7 +61,7 @@ class RingBuffer(
 
     companion object {
         /**
-         * 依格式與目標毫秒數（§9：20–60ms）換算成要保留幾個 chunk。
+         * 依格式與目標毫秒數（§9：20–60ms，必要時到 100ms）換算成要保留幾個 chunk。
          * chunkBytes 是單一 PCM frame 的位元組數（跟 PC 端送過來的一致）。
          */
         fun capacityForTargetMs(

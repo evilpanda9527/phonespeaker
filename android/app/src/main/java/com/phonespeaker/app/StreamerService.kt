@@ -60,8 +60,20 @@ class StreamerService : Service() {
         private const val NOTIFICATION_CHANNEL_ID = "phonespeaker_streaming"
         private const val NOTIFICATION_ID = 1
 
-        // 依 §9：ring buffer target 20–60ms，取上限比較保守（少一點 underrun）。
-        private const val RING_BUFFER_TARGET_MS = 60
+        // 依 §9：ring buffer target 20–60ms，必要時才到 100ms。
+        // 實機驗收發現只有 WiFi 會偶爾雜音、USB（RNDIS）完全乾淨（見 SPEC3 §16
+        // 觀察項），研判是 WiFi 網路抖動造成 underrun——WiFi 抖動明顯大於
+        // USB 有線，因此兩者分開設定：USB 已驗收通過、延遲表現好，維持原本
+        // 上限值不動；WiFi 用 §9 允許的「必要時 100ms」上限，換一點延遲
+        // 空間吸收抖動。日後其他 transport（U2/U3/BT）若也出現同類雜音，
+        // 比照這裡加一個分支即可，不需要再動這支狀態機本身的邏輯。
+        private const val WIFI_RING_BUFFER_TARGET_MS = 100
+        private const val USB_RING_BUFFER_TARGET_MS = 60
+
+        private fun ringBufferTargetMsFor(mode: TransportMode): Int = when (mode) {
+            TransportMode.WIFI -> WIFI_RING_BUFFER_TARGET_MS
+            TransportMode.USB_RNDIS -> USB_RING_BUFFER_TARGET_MS
+        }
 
         /** 讓 MainActivity 訂閱狀態；同一個 process 內的簡單 observer，M1-A 夠用。 */
         @Volatile
@@ -233,7 +245,11 @@ class StreamerService : Service() {
                 // 換算出來的 target ms 準不準（純粹是 UI/log 顯示層面的估計值）。
                 val newPlayer = AudioPlayer()
                 val newRingBuffer = RingBuffer(
-                    RingBuffer.capacityForTargetMs(fmt, fmt.bytesPerFrame() * 480, RING_BUFFER_TARGET_MS)
+                    RingBuffer.capacityForTargetMs(
+                        fmt,
+                        fmt.bytesPerFrame() * 480,
+                        ringBufferTargetMsFor(selectedMode),
+                    )
                 )
                 try {
                     newPlayer.start(fmt, newRingBuffer)
