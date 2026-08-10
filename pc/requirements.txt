@@ -1,0 +1,13 @@
+# PhoneSpeaker PC 端相依套件（M1-A WiFi 範圍）。
+# 依 CLAUDE.md 規範以 `pip freeze` 鎖版本；U2(adb)/U3(libusb) 對應階段完成時再各自加入。
+
+PyAudioWPatch==0.2.12.8
+pycaw==20251023
+comtypes==1.4.16
+customtkinter==6.0.0
+zeroconf==0.150.0
+
+# 下列為上述套件的間接相依，一併鎖定版本以確保可重現安裝：
+darkdetect==0.8.0
+ifaddr==0.2.0
+packaging==26.3

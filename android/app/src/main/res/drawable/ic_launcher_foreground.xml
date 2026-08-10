@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- 簡易喇叭圖示，置中在 adaptive icon 安全區內（避免被裁切） -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M40,42 L40,66 L52,66 L68,80 L68,28 L52,42 Z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M76,44 C81,49 81,59 76,64 L72,60 C75,57 75,51 72,48 Z" />
+</vector>

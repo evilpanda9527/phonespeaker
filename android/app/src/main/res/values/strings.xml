@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">PhoneSpeaker</string>
+
+    <string name="status_idle">尚未啟動</string>
+    <string name="status_discovering">搜尋 PC…</string>
+    <string name="status_connecting">連線中…</string>
+    <string name="status_handshaking">握手中…</string>
+    <string name="status_streaming">串流中 ✅</string>
+    <string name="status_format_unsupported">格式不支援（FORMAT_UNSUPPORTED）</string>
+    <string name="status_error">錯誤</string>
+    <string name="status_stopped">已停止</string>
+
+    <string name="btn_start">啟動</string>
+    <string name="btn_stop">停止</string>
+
+    <string name="label_transport">Transport：</string>
+    <string name="label_status">狀態：</string>
+    <string name="label_format">目前音訊格式：</string>
+
+    <string name="notification_channel_name">PhoneSpeaker 串流</string>
+    <string name="notification_title">PhoneSpeaker 正在播放 PC 音訊</string>
+    <string name="notification_text_waiting">等待 PC 連線…</string>
+    <string name="notification_text_streaming">串流中</string>
+</resources>

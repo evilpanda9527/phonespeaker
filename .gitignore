@@ -1,0 +1,47 @@
+# Python (pc/)
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+
+# Environment & config
+.env
+config.json
+*.log
+pc/logs/
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editors
+.vscode/settings.json
+.idea/
+
+# Output & temp
+output/
+temp/
+*.tmp
+*.bak
+
+# Android (android/)
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/
+android/*.iml
+android/app/*.iml
+android/captures/
+android/.cxx/
+*.apk
+*.aab
+
+# Windows installer build artefacts (installer/)
+installer/*.exe
+installer/Output/
