@@ -19,17 +19,19 @@ import customtkinter as ctk
 import config
 from core.stream_engine import EngineCallbacks, EngineState, StreamEngine
 from transport.base import Transport
+from transport.usb_adb import UsbAdbTransport
 from transport.usb_rndis import UsbRndisTransport
 from transport.wifi import WifiTransport
 
 logger = logging.getLogger(__name__)
 
 # transport 顯示名稱 → 建立函式。U1(USB 網路共享) 通過後在這裡加一行；
-# U2/U3/BT 通過驗收後比照辦理，不需要動這個檔案其他邏輯（§10.3 檔案隔離
-# 原則的精神也適用在「新增選項」這件事上）。
+# U2(USB adb) 通過驗收後比照辦理；U3/BT 依此類推，不需要動這個檔案其他邏輯
+# （§10.3 檔案隔離原則的精神也適用在「新增選項」這件事上）。
 TRANSPORT_FACTORIES: dict[str, Callable[[], Transport]] = {
     "WiFi": lambda: WifiTransport(),
     "USB (USB 網路共享)": lambda: UsbRndisTransport(),
+    "USB (adb)": lambda: UsbAdbTransport(),
 }
 
 _STATE_LABELS = {

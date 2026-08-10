@@ -15,10 +15,10 @@ import com.phonespeaker.app.databinding.ActivityMainBinding
 /**
  * MainActivity.kt — 最小 UI：transport 選擇、啟動/停止、狀態、格式、log。
  *
- * transport 選單目前有 WiFi、USB (USB 網路共享) 兩項（見 [transportOptions]）；
- * U2/U3/BT 驗收通過後，比照 U1 在 [transportOptions] 加一行即可（§10.3：
- * 新增選項不動既有邏輯）。選到的模式透過 Intent extra 傳給
- * StreamerService，實際建立哪個 Transport 由 StreamerService 決定。
+ * transport 選單目前有 WiFi、USB (USB 網路共享)、USB (adb) 三項（見
+ * [transportOptions]）；U3/BT 驗收通過後，比照 U2 在 [transportOptions]
+ * 加一行即可（§10.3：新增選項不動既有邏輯）。選到的模式透過 Intent extra
+ * 傳給 StreamerService，實際建立哪個 Transport 由 StreamerService 決定。
  */
 class MainActivity : AppCompatActivity() {
 
@@ -29,6 +29,7 @@ class MainActivity : AppCompatActivity() {
     private val transportOptions = listOf(
         "WiFi" to TransportMode.WIFI,
         "USB (USB 網路共享)" to TransportMode.USB_RNDIS,
+        "USB (adb)" to TransportMode.USB_ADB,
     )
 
     private val notificationPermissionLauncher =

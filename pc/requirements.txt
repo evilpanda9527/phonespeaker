@@ -1,5 +1,8 @@
 # PhoneSpeaker PC 端相依套件（M1-A WiFi 範圍）。
-# 依 CLAUDE.md 規範以 `pip freeze` 鎖版本；U2(adb)/U3(libusb) 對應階段完成時再各自加入。
+# 依 CLAUDE.md 規範以 `pip freeze` 鎖版本；U3(libusb) 對應階段完成時再加入。
+# U2(USB adb) 只用到 Python 標準庫（subprocess/shutil）呼叫外部 `adb` 執行檔，
+# 不需要新增套件；`adb` 本身不是 pip 套件，需使用者另外安裝 Android SDK
+# Platform-Tools 並確保在 PATH 裡（見 pc/transport/usb_adb.py）。
 
 PyAudioWPatch==0.2.12.8
 pycaw==20251023

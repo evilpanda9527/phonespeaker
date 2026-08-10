@@ -22,6 +22,7 @@ import com.phonespeaker.app.core.payloadAsDebugString
 import com.phonespeaker.app.transport.Transport
 import com.phonespeaker.app.transport.TransportCancelledException
 import com.phonespeaker.app.transport.TransportException
+import com.phonespeaker.app.transport.UsbAdbTransport
 import com.phonespeaker.app.transport.UsbTcpTransport
 import com.phonespeaker.app.transport.WifiTransport
 
@@ -39,7 +40,7 @@ import com.phonespeaker.app.transport.WifiTransport
 enum class ServiceState { IDLE, DISCOVERING, HANDSHAKE, STREAMING, STOPPED }
 
 /** 使用者在 MainActivity 選的連線方式，透過 [StreamerService.EXTRA_TRANSPORT_MODE] 傳入。 */
-enum class TransportMode { WIFI, USB_RNDIS }
+enum class TransportMode { WIFI, USB_RNDIS, USB_ADB }
 
 interface StatusListener {
     fun onStateChanged(state: ServiceState) {}
@@ -65,14 +66,17 @@ class StreamerService : Service() {
         // 觀察項），研判是 WiFi 網路抖動造成 underrun——WiFi 抖動明顯大於
         // USB 有線，因此兩者分開設定：USB 已驗收通過、延遲表現好，維持原本
         // 上限值不動；WiFi 用 §9 允許的「必要時 100ms」上限，換一點延遲
-        // 空間吸收抖動。日後其他 transport（U2/U3/BT）若也出現同類雜音，
-        // 比照這裡加一個分支即可，不需要再動這支狀態機本身的邏輯。
+        // 空間吸收抖動。U2(USB adb) 一樣是 USB 有線鏈路（只是多繞一層 adb
+        // reverse 轉發，不影響實際傳輸媒介），沿用跟 U1 相同的數值；日後
+        // 其他 transport（U3/BT）若也出現同類雜音，比照這裡加一個分支即可，
+        // 不需要再動這支狀態機本身的邏輯。
         private const val WIFI_RING_BUFFER_TARGET_MS = 100
         private const val USB_RING_BUFFER_TARGET_MS = 60
 
         private fun ringBufferTargetMsFor(mode: TransportMode): Int = when (mode) {
             TransportMode.WIFI -> WIFI_RING_BUFFER_TARGET_MS
             TransportMode.USB_RNDIS -> USB_RING_BUFFER_TARGET_MS
+            TransportMode.USB_ADB -> USB_RING_BUFFER_TARGET_MS
         }
 
         /** 讓 MainActivity 訂閱狀態；同一個 process 內的簡單 observer，M1-A 夠用。 */
@@ -210,6 +214,7 @@ class StreamerService : Service() {
     private fun createTransport(mode: TransportMode): Transport = when (mode) {
         TransportMode.WIFI -> WifiTransport(applicationContext)
         TransportMode.USB_RNDIS -> UsbTcpTransport(applicationContext)
+        TransportMode.USB_ADB -> UsbAdbTransport(applicationContext)
     }
 
     @Throws(TransportException::class)
