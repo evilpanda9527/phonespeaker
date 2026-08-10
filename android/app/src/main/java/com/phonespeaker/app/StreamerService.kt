@@ -22,6 +22,7 @@ import com.phonespeaker.app.core.payloadAsDebugString
 import com.phonespeaker.app.transport.Transport
 import com.phonespeaker.app.transport.TransportCancelledException
 import com.phonespeaker.app.transport.TransportException
+import com.phonespeaker.app.transport.UsbTcpTransport
 import com.phonespeaker.app.transport.WifiTransport
 
 /**
@@ -30,11 +31,15 @@ import com.phonespeaker.app.transport.WifiTransport
  * 對應 PC 端 pc/core/stream_engine.py 的角色：把 Transport、AudioPlayer、
  * RingBuffer 串起來跑狀態機，並用 Foreground Service 確保鎖屏後仍能續播。
  *
- * M1-A 範圍：transport 目前寫死用 WifiTransport；之後 U1/U2/U3/BT 驗收通過後，
- * 這裡改成依使用者在 MainActivity 選的 transport 名稱建立對應實作即可，
- * 不需要動狀態機本身的邏輯。
+ * transport 依 MainActivity 傳進來的 [TransportMode]（見 [EXTRA_TRANSPORT_MODE]）
+ * 由 [createTransport] 建立對應實作；U2/U3/BT 驗收通過後，比照 U1 在
+ * [TransportMode] 加一個成員、[createTransport] 加一個分支即可，不需要動
+ * 狀態機本身的邏輯（見 runEngine()/handleConnection()，兩者從頭到尾都沒改）。
  */
 enum class ServiceState { IDLE, DISCOVERING, HANDSHAKE, STREAMING, STOPPED }
+
+/** 使用者在 MainActivity 選的連線方式，透過 [StreamerService.EXTRA_TRANSPORT_MODE] 傳入。 */
+enum class TransportMode { WIFI, USB_RNDIS }
 
 interface StatusListener {
     fun onStateChanged(state: ServiceState) {}
@@ -49,6 +54,8 @@ class StreamerService : Service() {
         private const val TAG = "StreamerService"
         const val ACTION_START = "com.phonespeaker.app.action.START"
         const val ACTION_STOP = "com.phonespeaker.app.action.STOP"
+        /** String extra，值是 [TransportMode] 的 name（例如 "WIFI"、"USB_RNDIS"）。 */
+        const val EXTRA_TRANSPORT_MODE = "com.phonespeaker.app.extra.TRANSPORT_MODE"
 
         private const val NOTIFICATION_CHANNEL_ID = "phonespeaker_streaming"
         private const val NOTIFICATION_ID = 1
@@ -73,6 +80,7 @@ class StreamerService : Service() {
     @Volatile private var stopRequested = false
     private var transport: Transport? = null
     private var wakeLock: PowerManager.WakeLock? = null
+    private var selectedMode: TransportMode = TransportMode.WIFI
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -87,7 +95,13 @@ class StreamerService : Service() {
                 stopEngine()
                 stopSelf()
             }
-            else -> startEngine()
+            else -> {
+                val modeName = intent?.getStringExtra(EXTRA_TRANSPORT_MODE)
+                // 找不到/不合法的 mode 名稱時退回 WIFI，維持 M1-A 既有行為，
+                // 不因為傳輸模式參數缺失就整個啟動失敗。
+                selectedMode = TransportMode.values().find { it.name == modeName } ?: TransportMode.WIFI
+                startEngine()
+            }
         }
         return START_NOT_STICKY
     }
@@ -152,11 +166,11 @@ class StreamerService : Service() {
             setState(ServiceState.DISCOVERING)
             log("等待/搜尋 PC…")
 
-            val wifiTransport = WifiTransport(applicationContext)
-            transport = wifiTransport
+            val activeTransport = createTransport(selectedMode)
+            transport = activeTransport
 
             try {
-                wifiTransport.connect()
+                activeTransport.connect()
             } catch (e: TransportCancelledException) {
                 break
             } catch (e: TransportException) {
@@ -167,17 +181,23 @@ class StreamerService : Service() {
 
             setState(ServiceState.HANDSHAKE)
             try {
-                handleConnection(wifiTransport)
+                handleConnection(activeTransport)
             } catch (e: TransportException) {
                 log("連線中斷: ${e.message}")
             } finally {
-                wifiTransport.disconnect()
+                activeTransport.disconnect()
             }
 
             if (stopRequested) break
             log("已斷線，回到等待連線狀態（§3 reconnect）")
         }
         setState(ServiceState.STOPPED)
+    }
+
+    /** 唯一「依使用者選的模式建立對應 transport」的地方；狀態機其餘邏輯完全不知道用的是哪個 transport。 */
+    private fun createTransport(mode: TransportMode): Transport = when (mode) {
+        TransportMode.WIFI -> WifiTransport(applicationContext)
+        TransportMode.USB_RNDIS -> UsbTcpTransport(applicationContext)
     }
 
     @Throws(TransportException::class)

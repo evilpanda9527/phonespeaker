@@ -5,6 +5,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.widget.ArrayAdapter
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -12,15 +13,23 @@ import com.phonespeaker.app.core.AudioFormat
 import com.phonespeaker.app.databinding.ActivityMainBinding
 
 /**
- * MainActivity.kt — M1-A 範圍的最小 UI：啟動/停止、狀態、格式、log。
+ * MainActivity.kt — 最小 UI：transport 選擇、啟動/停止、狀態、格式、log。
  *
- * transport 選擇目前只有 WiFi（寫死在 StreamerService），之後 U1/U2/U3/BT
- * 驗收通過後再補上選單（§10.3：新增選項不動既有邏輯）。
+ * transport 選單目前有 WiFi、USB (USB 網路共享) 兩項（見 [transportOptions]）；
+ * U2/U3/BT 驗收通過後，比照 U1 在 [transportOptions] 加一行即可（§10.3：
+ * 新增選項不動既有邏輯）。選到的模式透過 Intent extra 傳給
+ * StreamerService，實際建立哪個 Transport 由 StreamerService 決定。
  */
 class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
     private var running = false
+
+    /** 顯示文字（跟 PC 端 gui.py 的 TRANSPORT_FACTORIES 顯示名稱保持一致） → TransportMode。 */
+    private val transportOptions = listOf(
+        "WiFi" to TransportMode.WIFI,
+        "USB (USB 網路共享)" to TransportMode.USB_RNDIS,
+    )
 
     private val notificationPermissionLauncher =
         registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.RequestPermission()) { }
@@ -52,6 +61,12 @@ class MainActivity : AppCompatActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
+        binding.transportSpinner.adapter = ArrayAdapter(
+            this,
+            android.R.layout.simple_spinner_dropdown_item,
+            transportOptions.map { it.first },
+        )
+
         binding.startStopButton.setOnClickListener { onToggleStartStop() }
 
         requestNotificationPermissionIfNeeded()
@@ -78,8 +93,10 @@ class MainActivity : AppCompatActivity() {
             }
             startService(intent)
         } else {
+            val selectedMode = transportOptions[binding.transportSpinner.selectedItemPosition].second
             val intent = Intent(this, StreamerService::class.java).apply {
                 action = StreamerService.ACTION_START
+                putExtra(StreamerService.EXTRA_TRANSPORT_MODE, selectedMode.name)
             }
             ContextCompat.startForegroundService(this, intent)
         }
@@ -90,6 +107,7 @@ class MainActivity : AppCompatActivity() {
             state == ServiceState.HANDSHAKE ||
             state == ServiceState.STREAMING
         binding.startStopButton.text = getString(if (running) R.string.btn_stop else R.string.btn_start)
+        binding.transportSpinner.isEnabled = !running
         binding.statusText.text = when (state) {
             ServiceState.IDLE -> getString(R.string.status_idle)
             ServiceState.DISCOVERING -> getString(R.string.status_discovering)

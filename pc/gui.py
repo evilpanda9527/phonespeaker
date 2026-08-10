@@ -17,14 +17,17 @@ import customtkinter as ctk
 import config
 from core.stream_engine import EngineCallbacks, EngineState, StreamEngine
 from transport.base import Transport
+from transport.usb_rndis import UsbRndisTransport
 from transport.wifi import WifiTransport
 
 logger = logging.getLogger(__name__)
 
-# transport 顯示名稱 → 建立函式。M1-A 只有 WiFi；U1/U2/U3/BT 通過驗收後
-# 各自在自己的檔案裡定義好 Transport 實作，再回來這裡加一行即可。
+# transport 顯示名稱 → 建立函式。U1(USB 網路共享) 通過後在這裡加一行；
+# U2/U3/BT 通過驗收後比照辦理，不需要動這個檔案其他邏輯（§10.3 檔案隔離
+# 原則的精神也適用在「新增選項」這件事上）。
 TRANSPORT_FACTORIES: dict[str, Callable[[], Transport]] = {
     "WiFi": lambda: WifiTransport(),
+    "USB (USB 網路共享)": lambda: UsbRndisTransport(),
 }
 
 _STATE_LABELS = {
@@ -44,6 +47,7 @@ class App(ctk.CTk):
         self.minsize(520, 440)
 
         self._engine: Optional[StreamEngine] = None
+        self._active_transport: Optional[Transport] = None
         self._log_queue: "queue.Queue[str]" = queue.Queue()
         self._running = False
 
@@ -95,6 +99,17 @@ class App(ctk.CTk):
         self.format_label = ctk.CTkLabel(format_frame, text="—")
         self.format_label.pack(side="left")
 
+        # U1(USB 網路共享) 保底資訊：mDNS 探索失敗/不穩時，顯示 PC 端偵測到
+        # 的 RNDIS IP 供使用者手動確認。只有 transport 有 `detected_ip`
+        # 屬性（目前只有 UsbRndisTransport）時才會顯示文字，WiFi 模式下
+        # 這行永遠是空的，不影響既有畫面（見 _on_state_changed）。
+        usb_fallback_frame = ctk.CTkFrame(self)
+        usb_fallback_frame.pack(fill="x", padx=12, pady=(0, 6))
+        self.usb_fallback_label = ctk.CTkLabel(
+            usb_fallback_frame, text="", text_color=("gray40", "gray60")
+        )
+        self.usb_fallback_label.pack(side="left", padx=(4, 4))
+
         ctk.CTkLabel(self, text="Log：").pack(anchor="w", padx=12)
         self.log_box = ctk.CTkTextbox(self, wrap="word")
         self.log_box.pack(fill="both", expand=True, padx=12, pady=(0, 12))
@@ -114,6 +129,7 @@ class App(ctk.CTk):
         transport_name = self.transport_var.get()
         factory = TRANSPORT_FACTORIES[transport_name]
         transport = factory()
+        self._active_transport = transport
 
         callbacks = EngineCallbacks(
             on_state_changed=self._threadsafe(self._on_state_changed),
@@ -133,17 +149,30 @@ class App(ctk.CTk):
         if self._engine is not None:
             self._engine.stop()
             self._engine = None
+        self._active_transport = None
         self._running = False
         self.start_stop_btn.configure(text="啟動")
         self.transport_menu.configure(state="normal")
         self.status_label.configure(text=_STATE_LABELS[EngineState.IDLE])
         self.format_label.configure(text="—")
+        self.usb_fallback_label.configure(text="")
         self._append_log("已停止")
 
     def _on_state_changed(self, state: EngineState) -> None:
         self.status_label.configure(text=_STATE_LABELS.get(state, str(state)))
         if self._engine is not None and self._engine.current_format is not None:
             self.format_label.configure(text=str(self._engine.current_format))
+        # `detected_ip` 只有 UsbRndisTransport 才有；WiFi 模式下這裡永遠是
+        # None，標籤維持空白，不影響既有畫面。
+        detected_ip = getattr(self._active_transport, "detected_ip", None)
+        self.usb_fallback_label.configure(
+            text=(
+                f"USB 網段偵測到的 PC IP：{detected_ip}"
+                "（手機自動探索失敗時，可用這個位址手動確認在同一個 USB 網段）"
+                if detected_ip
+                else ""
+            )
+        )
         if state == EngineState.STOPPED:
             self._running = False
             self.start_stop_btn.configure(text="啟動")
