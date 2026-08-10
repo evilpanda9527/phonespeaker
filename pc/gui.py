@@ -3,6 +3,11 @@
 M1-A 範圍：只有 WiFi 這個 transport 選項。之後 U1/U2/U3/BT 驗收通過後，
 只需要在 TRANSPORT_FACTORIES 這個字典加一行，不需要動這個檔案其他邏輯
 （§10.3 檔案隔離原則的精神也適用在「新增選項」這件事上）。
+
+雙語（todo010）：所有面向使用者的文字改透過 i18n.t() 查表，不寫死中文，
+方便介面隨系統語言/手動切換即時重繪（見 _apply_language()）。transport
+的「內部代號」（wifi / usb_rndis / usb_adb）跟「顯示名稱」分開——顯示名稱
+會隨語言變、代號不會，選單的 command callback 用代號分派，不受語言影響。
 """
 
 from __future__ import annotations
@@ -17,6 +22,7 @@ from typing import Callable, Optional
 import customtkinter as ctk
 
 import config
+import i18n
 from core.stream_engine import EngineCallbacks, EngineState, StreamEngine
 from transport.base import Transport
 from transport.usb_adb import UsbAdbTransport
@@ -25,37 +31,30 @@ from transport.wifi import WifiTransport
 
 logger = logging.getLogger(__name__)
 
-# transport 顯示名稱 → 建立函式。U1(USB 網路共享) 通過後在這裡加一行；
-# U2(USB adb) 通過驗收後比照辦理；U3/BT 依此類推，不需要動這個檔案其他邏輯
-# （§10.3 檔案隔離原則的精神也適用在「新增選項」這件事上）。
+# transport 內部代號（順序＝下拉選單順序，WiFi 為預設選項）→ 建立函式。
+# U1(USB 網路共享)/U2(USB adb) 通過驗收後依序加入；U3/BT 依此類推，不需要
+# 動這個檔案其他邏輯（§10.3 檔案隔離原則的精神也適用在「新增選項」這件事
+# 上）。顯示名稱／引導提示改放 i18n.py（見 transport.<id>.name / .hint），
+# 不在這裡寫死語言。
+TRANSPORT_IDS: list[str] = ["wifi", "usb_rndis", "usb_adb"]
 TRANSPORT_FACTORIES: dict[str, Callable[[], Transport]] = {
-    "WiFi": lambda: WifiTransport(),
-    "USB (USB 網路共享)": lambda: UsbRndisTransport(),
-    "USB (adb)": lambda: UsbAdbTransport(),
+    "wifi": lambda: WifiTransport(),
+    "usb_rndis": lambda: UsbRndisTransport(),
+    "usb_adb": lambda: UsbAdbTransport(),
 }
 
-# 選到某個 transport 時，在下拉選單下方顯示的引導文字，提醒使用者先在手機
-# 開對應的開關。純 UI 提示（見 todo08-1），不影響任何連線/傳輸邏輯；WiFi
-# 沒有額外開關需求，維持空字串。
-TRANSPORT_HINTS: dict[str, str] = {
-    "WiFi": "",
-    "USB (USB 網路共享)": "請先在手機開啟「USB 網路共享 / USB tethering」。",
-    "USB (adb)": "請先在手機開啟「USB 偵錯」（開發者選項）。",
-}
-
-_STATE_LABELS = {
-    EngineState.IDLE: "尚未啟動",
-    EngineState.WAITING: "等待手機連線…",
-    EngineState.HANDSHAKE: "握手中…",
-    EngineState.STREAMING: "串流中 ✅",
-    EngineState.STOPPED: "已停止",
+_STATE_KEYS = {
+    EngineState.IDLE: "state.idle",
+    EngineState.WAITING: "state.waiting",
+    EngineState.HANDSHAKE: "state.handshake",
+    EngineState.STREAMING: "state.streaming",
+    EngineState.STOPPED: "state.stopped",
 }
 
 
 class App(ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("PhoneSpeaker (PC) — M1-A WiFi PoC")
         self.geometry("620x520")
         self.minsize(520, 440)
 
@@ -67,7 +66,15 @@ class App(ctk.CTk):
         self._callback_queue: "queue.Queue[tuple[Callable, tuple, dict]]" = queue.Queue()
         self._running = False
 
+        # 目前選中的 transport 代號、engine 狀態、格式顯示——語言切換時要
+        # 靠這些「目前狀態」重繪對應文字（見 _apply_language），不能只在
+        # 事件發生的當下寫死文字（否則切語言不會回頭更新舊文字）。
+        self._selected_transport_id: str = TRANSPORT_IDS[0]
+        self._current_state: EngineState = EngineState.IDLE
+        self._current_format_text: Optional[str] = None  # None＝顯示 placeholder
+
         self._build_ui()
+        self._apply_language()
         self.after(100, self._drain_callback_queue)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -79,26 +86,41 @@ class App(ctk.CTk):
         top = ctk.CTkFrame(self)
         top.pack(fill="x", padx=12, pady=(12, 6))
 
-        ctk.CTkLabel(top, text="Transport：").pack(side="left", padx=(4, 4))
-        self.transport_var = ctk.StringVar(value=next(iter(TRANSPORT_FACTORIES)))
+        self.transport_caption = ctk.CTkLabel(top, text="")
+        self.transport_caption.pack(side="left", padx=(4, 4))
+        self.transport_var = ctk.StringVar()
         self.transport_menu = ctk.CTkOptionMenu(
             top,
-            values=list(TRANSPORT_FACTORIES),
+            values=[],
             variable=self.transport_var,
             command=self._on_transport_selected,
         )
         self.transport_menu.pack(side="left", padx=(0, 16))
 
         self.start_stop_btn = ctk.CTkButton(
-            top, text="啟動", command=self._on_toggle_start_stop, width=100
+            top, text="", command=self._on_toggle_start_stop, width=100
         )
         self.start_stop_btn.pack(side="left")
 
-        # transport 引導提示（見 todo08-1）：選到需要手機端先開開關的
-        # transport 時，在下拉選單下方顯示一行不擋流程的說明文字。用粗體
-        # 黃色跟其他一般說明文字（灰色）區隔，讓使用者一眼就注意到（使用者
-        # 反饋：原本的灰色不夠醒目）。淺色模式用較深的琥珀色維持可讀對比，
-        # 深色模式用較亮的金黃色。
+        # 語言切換（todo010）：靠右放一個下拉選單，選項含「自動（跟隨系統）」
+        # 與明確的 zh-TW / en。純 UI 文字層設定，不影響任何連線/傳輸邏輯。
+        self.language_caption = ctk.CTkLabel(top, text="")
+        self.language_caption.pack(side="right", padx=(4, 4))
+        self.language_var = ctk.StringVar()
+        self.language_menu = ctk.CTkOptionMenu(
+            top,
+            values=[],
+            variable=self.language_var,
+            command=self._on_language_selected,
+            width=140,
+        )
+        self.language_menu.pack(side="right", padx=(0, 4))
+
+        # transport 引導提示（見 todo08-1；WiFi 提示為 todo010 新增）：選到
+        # 需要手機端先開開關／同一網路的 transport 時，在下拉選單下方顯示
+        # 一行不擋流程的說明文字。用粗體黃色跟其他一般說明文字（灰色）區隔，
+        # 讓使用者一眼就注意到（使用者反饋：原本的灰色不夠醒目）。淺色模式
+        # 用較深的琥珀色維持可讀對比，深色模式用較亮的金黃色。
         hint_frame = ctk.CTkFrame(self)
         hint_frame.pack(fill="x", padx=12, pady=(0, 6))
         self.transport_hint_label = ctk.CTkLabel(
@@ -108,30 +130,25 @@ class App(ctk.CTk):
             font=ctk.CTkFont(weight="bold"),
         )
         self.transport_hint_label.pack(side="left", padx=(4, 4))
-        self._update_transport_hint(self.transport_var.get())
 
         status_frame = ctk.CTkFrame(self)
         status_frame.pack(fill="x", padx=12, pady=6)
 
-        ctk.CTkLabel(status_frame, text="狀態：").pack(side="left", padx=(4, 4))
-        self.status_label = ctk.CTkLabel(
-            status_frame, text=_STATE_LABELS[EngineState.IDLE]
-        )
+        self.status_caption = ctk.CTkLabel(status_frame, text="")
+        self.status_caption.pack(side="left", padx=(4, 4))
+        self.status_label = ctk.CTkLabel(status_frame, text="")
         self.status_label.pack(side="left")
 
-        latency_lo = config.RING_BUFFER_TARGET_MS_MIN
-        latency_hi = config.RING_BUFFER_TARGET_MS_MAX
         self.latency_label = ctk.CTkLabel(
-            status_frame,
-            text=f"（estimated latency target: {latency_lo}–{latency_hi}ms，network + buffer，非精確 E2E）",
-            text_color=("gray40", "gray60"),
+            status_frame, text="", text_color=("gray40", "gray60")
         )
         self.latency_label.pack(side="left", padx=(12, 4))
 
         format_frame = ctk.CTkFrame(self)
         format_frame.pack(fill="x", padx=12, pady=6)
-        ctk.CTkLabel(format_frame, text="目前音訊格式：").pack(side="left", padx=(4, 4))
-        self.format_label = ctk.CTkLabel(format_frame, text="—")
+        self.format_caption = ctk.CTkLabel(format_frame, text="")
+        self.format_caption.pack(side="left", padx=(4, 4))
+        self.format_label = ctk.CTkLabel(format_frame, text="")
         self.format_label.pack(side="left")
 
         # U1(USB 網路共享) 保底資訊：mDNS 探索失敗/不穩時，顯示 PC 端偵測到
@@ -145,10 +162,67 @@ class App(ctk.CTk):
         )
         self.usb_fallback_label.pack(side="left", padx=(4, 4))
 
-        ctk.CTkLabel(self, text="Log：").pack(anchor="w", padx=12)
+        self.log_caption = ctk.CTkLabel(self, text="")
+        self.log_caption.pack(anchor="w", padx=12)
         self.log_box = ctk.CTkTextbox(self, wrap="word")
         self.log_box.pack(fill="both", expand=True, padx=12, pady=(0, 12))
         self.log_box.configure(state="disabled")
+
+    # ------------------------------------------------------------------ #
+    # 語言（todo010）：目前解析後的介面語言變動時，重繪所有靜態文字。
+    # 只動文字內容，不動任何 widget 的存在與否／版面結構／連線邏輯。
+    # ------------------------------------------------------------------ #
+
+    def _apply_language(self) -> None:
+        self.title(i18n.t("app.window_title"))
+
+        self.transport_caption.configure(text=i18n.t("label.transport"))
+        self._transport_label_to_id = {
+            i18n.t(f"transport.{tid}.name"): tid for tid in TRANSPORT_IDS
+        }
+        transport_labels = list(self._transport_label_to_id)
+        self.transport_menu.configure(values=transport_labels)
+        self.transport_var.set(i18n.t(f"transport.{self._selected_transport_id}.name"))
+        self.transport_hint_label.configure(
+            text=i18n.t(f"transport.{self._selected_transport_id}.hint")
+        )
+
+        self.start_stop_btn.configure(
+            text=i18n.t("btn.stop" if self._running else "btn.start")
+        )
+
+        self.language_caption.configure(text=i18n.t("label.language"))
+        self._language_label_to_pref = {
+            i18n.language_preference_label(p): p for p in i18n.LANGUAGE_PREFERENCES
+        }
+        self.language_menu.configure(values=list(self._language_label_to_pref))
+        self.language_var.set(i18n.language_preference_label(i18n.get_preference()))
+
+        self.status_caption.configure(text=i18n.t("label.status"))
+        self.status_label.configure(text=i18n.t(_STATE_KEYS.get(self._current_state, "state.idle")))
+
+        self.latency_label.configure(
+            text=i18n.t(
+                "latency.label",
+                lo=config.RING_BUFFER_TARGET_MS_MIN,
+                hi=config.RING_BUFFER_TARGET_MS_MAX,
+            )
+        )
+
+        self.format_caption.configure(text=i18n.t("label.format"))
+        self.format_label.configure(text=self._current_format_text or i18n.t("format.placeholder"))
+
+        self._refresh_usb_fallback_label()
+
+        self.log_caption.configure(text=i18n.t("label.log"))
+
+    def _refresh_usb_fallback_label(self) -> None:
+        # `detected_ip` 只有 UsbRndisTransport 才有；WiFi 模式下這裡永遠是
+        # None，標籤維持空白，不影響既有畫面。
+        detected_ip = getattr(self._active_transport, "detected_ip", None)
+        self.usb_fallback_label.configure(
+            text=i18n.t("usb_fallback.label", ip=detected_ip) if detected_ip else ""
+        )
 
     # ------------------------------------------------------------------ #
     # 事件處理
@@ -156,10 +230,18 @@ class App(ctk.CTk):
 
     def _on_transport_selected(self, choice: str) -> None:
         """下拉選單 command callback：純 UI 提示更新，不動連線邏輯（todo08-1）。"""
-        self._update_transport_hint(choice)
+        self._selected_transport_id = self._transport_label_to_id.get(choice, self._selected_transport_id)
+        self.transport_hint_label.configure(
+            text=i18n.t(f"transport.{self._selected_transport_id}.hint")
+        )
 
-    def _update_transport_hint(self, transport_name: str) -> None:
-        self.transport_hint_label.configure(text=TRANSPORT_HINTS.get(transport_name, ""))
+    def _on_language_selected(self, choice: str) -> None:
+        """語言下拉選單 command callback（todo010）：套用＋記住偏好，並重繪介面文字。"""
+        pref = self._language_label_to_pref.get(choice)
+        if pref is None:
+            return
+        i18n.set_preference(pref)
+        self._apply_language()
 
     def _on_toggle_start_stop(self) -> None:
         if self._running:
@@ -174,29 +256,34 @@ class App(ctk.CTk):
         # "device-monitor"、"pcm-sender"、"stream-engine"）。
         self._log_alive_threads("_start_engine() 啟動前")
 
-        transport_name = self.transport_var.get()
-        factory = TRANSPORT_FACTORIES[transport_name]
+        transport_id = self._selected_transport_id
+        factory = TRANSPORT_FACTORIES[transport_id]
         transport = factory()
         self._active_transport = transport
 
         callbacks = EngineCallbacks(
             on_state_changed=self._threadsafe(self._on_state_changed),
             on_log=self._threadsafe(self._append_log),
-            on_error=self._threadsafe(lambda msg: self._append_log(f"[錯誤] {msg}")),
+            on_error=self._threadsafe(
+                lambda msg: self._append_log(i18n.t("log.error_prefix", msg=msg))
+            ),
         )
         # 連線時 PC 一律靜音、只有手機出聲（原本可切換「不自動靜音」的開關
         # 實測無作用，已移除；StreamEngine 的 auto_mute 預設就是 True）。
         self._engine = StreamEngine(transport, callbacks=callbacks)
         self._engine.start()
         self._running = True
-        self.start_stop_btn.configure(text="停止")
+        self.start_stop_btn.configure(text=i18n.t("btn.stop"))
         self.transport_menu.configure(state="disabled")
-        self._append_log(f"已啟動 {transport_name} transport")
+        self._append_log(
+            i18n.t("log.started", transport=i18n.t(f"transport.{transport_id}.name"))
+        )
 
     def _stop_engine(self) -> None:
         # 診斷用（見 todo07-1）：量出「使用者按停止」到「engine.stop() 真的
         # 返回」的呼叫端總耗時，並在前後都印出背景執行緒清單，方便跟
         # stream_engine 內部各段的計時 log 對照。只加 log，不改行為/邏輯。
+        # （診斷用文字比照 core 層的診斷 log，本批刻意不雙語化，見 SPEC3 §18。）
         if self._engine is not None:
             t0 = time.monotonic()
             self._engine.stop()
@@ -207,32 +294,26 @@ class App(ctk.CTk):
             self._engine = None
         self._active_transport = None
         self._running = False
-        self.start_stop_btn.configure(text="啟動")
+        self._current_state = EngineState.IDLE
+        self._current_format_text = None
+        self.start_stop_btn.configure(text=i18n.t("btn.start"))
         self.transport_menu.configure(state="normal")
-        self.status_label.configure(text=_STATE_LABELS[EngineState.IDLE])
-        self.format_label.configure(text="—")
+        self.status_label.configure(text=i18n.t("state.idle"))
+        self.format_label.configure(text=i18n.t("format.placeholder"))
         self.usb_fallback_label.configure(text="")
-        self._append_log("已停止")
+        self._append_log(i18n.t("log.stopped"))
         self._log_alive_threads("_stop_engine() 結束後")
 
     def _on_state_changed(self, state: EngineState) -> None:
-        self.status_label.configure(text=_STATE_LABELS.get(state, str(state)))
+        self._current_state = state
+        self.status_label.configure(text=i18n.t(_STATE_KEYS.get(state, "state.idle")))
         if self._engine is not None and self._engine.current_format is not None:
-            self.format_label.configure(text=str(self._engine.current_format))
-        # `detected_ip` 只有 UsbRndisTransport 才有；WiFi 模式下這裡永遠是
-        # None，標籤維持空白，不影響既有畫面。
-        detected_ip = getattr(self._active_transport, "detected_ip", None)
-        self.usb_fallback_label.configure(
-            text=(
-                f"USB 網段偵測到的 PC IP：{detected_ip}"
-                "（手機自動探索失敗時，可用這個位址手動確認在同一個 USB 網段）"
-                if detected_ip
-                else ""
-            )
-        )
+            self._current_format_text = str(self._engine.current_format)
+            self.format_label.configure(text=self._current_format_text)
+        self._refresh_usb_fallback_label()
         if state == EngineState.STOPPED:
             self._running = False
-            self.start_stop_btn.configure(text="啟動")
+            self.start_stop_btn.configure(text=i18n.t("btn.start"))
             self.transport_menu.configure(state="normal")
 
     def _log_alive_threads(self, label: str) -> None:

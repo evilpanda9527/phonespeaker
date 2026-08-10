@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    strings.xml（繁體中文，zh-rTW）。
+
+    刻意跟 values-zh/strings.xml 內容完全相同：需求是「系統為中文（不分
+    繁簡）一律顯示繁體中文」，而不同 OEM/Android 版本對「zh-CN」「zh-Hans」
+    等 locale 的比對細節不盡相同——只提供 values-zh 有時不保證會被 zh-TW
+    這個更明確的 locale 選到（更明確的會被優先比對），只提供 values-zh-rTW
+    則涵蓋不到 zh-CN 等其他中文 locale。兩份都放、內容一致，兩種情況都能
+    落到繁體中文（todo010）。
+-->
+<resources>
+    <string name="app_name">PhoneSpeaker</string>
+
+    <string name="status_idle">尚未啟動</string>
+    <string name="status_discovering">搜尋 PC…</string>
+    <string name="status_connecting">連線中…</string>
+    <string name="status_handshaking">握手中…</string>
+    <string name="status_streaming">串流中 ✅</string>
+    <string name="status_format_unsupported">格式不支援（FORMAT_UNSUPPORTED）</string>
+    <string name="status_error">錯誤</string>
+    <string name="status_stopped">已停止</string>
+
+    <string name="btn_start">啟動</string>
+    <string name="btn_stop">停止</string>
+
+    <string name="label_transport">Transport：</string>
+    <string name="label_status">狀態：</string>
+    <string name="label_format">目前音訊格式：</string>
+    <string name="label_log">Log：</string>
+    <string name="label_language">語言：</string>
+
+    <!-- transport 下拉選單顯示名稱（跟 PC 端 pc/i18n.py 的 transport.<id>.name 對齊）. -->
+    <string name="transport_wifi_name">WiFi</string>
+    <string name="transport_usb_rndis_name">USB（USB 網路共享）</string>
+    <string name="transport_usb_adb_name">USB（adb）</string>
+
+    <!-- transport 引導提示（見 todo08-1；WiFi 提示為 todo010 新增）：選到
+         對應 transport 時顯示，提醒使用者先開對應開關／連到同一網路. -->
+    <string name="hint_transport_wifi">PC 與手機需連線至同一個 WiFi 網路。</string>
+    <string name="hint_transport_usb_rndis">請先在手機開啟「USB 網路共享 / USB tethering」。</string>
+    <string name="hint_transport_usb_adb">請先在手機開啟「USB 偵錯」（開發者選項）。</string>
+
+    <!-- 語言選單選項（todo010）："繁體中文"/"English" 用語言自身名稱顯示，
+         跟目前介面語言無關；只有「自動」跟著目前介面語言變化. -->
+    <string name="lang_auto">自動（跟隨系統）</string>
+    <string name="lang_zh_tw">繁體中文</string>
+    <string name="lang_en">English</string>
+
+    <string name="error_prefix">[錯誤] %1$s</string>
+
+    <string name="notification_channel_name">PhoneSpeaker 串流</string>
+    <string name="notification_title">PhoneSpeaker 正在播放 PC 音訊</string>
+    <string name="notification_text_waiting">等待 PC 連線…</string>
+    <string name="notification_text_streaming">串流中</string>
+</resources>

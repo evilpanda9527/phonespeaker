@@ -1,30 +1,56 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+    strings.xml — default (English) resources; also the fallback for any
+    locale we don't have a dedicated resource set for (todo010).
+
+    Traditional Chinese lives in values-zh/ and values-zh-rTW/ (both hold
+    identical content on purpose — see the comment there). System-language
+    following is handled by Android's normal resource-qualifier resolution;
+    no code needed for that half. Manual override + persistence is done in
+    MainActivity via AppCompatDelegate.setApplicationLocales().
+-->
 <resources>
     <string name="app_name">PhoneSpeaker</string>
 
-    <string name="status_idle">尚未啟動</string>
-    <string name="status_discovering">搜尋 PC…</string>
-    <string name="status_connecting">連線中…</string>
-    <string name="status_handshaking">握手中…</string>
-    <string name="status_streaming">串流中 ✅</string>
-    <string name="status_format_unsupported">格式不支援（FORMAT_UNSUPPORTED）</string>
-    <string name="status_error">錯誤</string>
-    <string name="status_stopped">已停止</string>
+    <string name="status_idle">Not started</string>
+    <string name="status_discovering">Searching for PC…</string>
+    <string name="status_connecting">Connecting…</string>
+    <string name="status_handshaking">Handshaking…</string>
+    <string name="status_streaming">Streaming ✅</string>
+    <string name="status_format_unsupported">Format not supported (FORMAT_UNSUPPORTED)</string>
+    <string name="status_error">Error</string>
+    <string name="status_stopped">Stopped</string>
 
-    <string name="btn_start">啟動</string>
-    <string name="btn_stop">停止</string>
+    <string name="btn_start">Start</string>
+    <string name="btn_stop">Stop</string>
 
-    <string name="label_transport">Transport：</string>
-    <string name="label_status">狀態：</string>
-    <string name="label_format">目前音訊格式：</string>
+    <string name="label_transport">Transport:</string>
+    <string name="label_status">Status:</string>
+    <string name="label_format">Current Audio Format:</string>
+    <string name="label_log">Log:</string>
+    <string name="label_language">Language:</string>
 
-    <!-- transport 引導提示（見 todo08-1）：選到對應 transport 時顯示，
-         提醒使用者先開對應開關。WiFi 不需要提示，程式碼端直接給空字串。 -->
-    <string name="hint_transport_usb_rndis">請先在手機開啟「USB 網路共享 / USB tethering」。</string>
-    <string name="hint_transport_usb_adb">請先在手機開啟「USB 偵錯」（開發者選項）。</string>
+    <!-- transport 下拉選單顯示名稱（跟 PC 端 pc/i18n.py 的 transport.<id>.name 對齊）. -->
+    <string name="transport_wifi_name">WiFi</string>
+    <string name="transport_usb_rndis_name">USB (Tethering)</string>
+    <string name="transport_usb_adb_name">USB (adb)</string>
 
-    <string name="notification_channel_name">PhoneSpeaker 串流</string>
-    <string name="notification_title">PhoneSpeaker 正在播放 PC 音訊</string>
-    <string name="notification_text_waiting">等待 PC 連線…</string>
-    <string name="notification_text_streaming">串流中</string>
+    <!-- transport 引導提示（見 todo08-1；WiFi 提示為 todo010 新增）：選到
+         對應 transport 時顯示，提醒使用者先開對應開關／連到同一網路. -->
+    <string name="hint_transport_wifi">PC and phone must be connected to the same Wi-Fi network.</string>
+    <string name="hint_transport_usb_rndis">First enable “USB tethering” on your phone.</string>
+    <string name="hint_transport_usb_adb">First enable “USB debugging” in Developer options on your phone.</string>
+
+    <!-- 語言選單選項（todo010）："繁體中文"/"English" 用語言自身名稱顯示，
+         跟目前介面語言無關；只有「自動」跟著目前介面語言變化. -->
+    <string name="lang_auto">Auto (System)</string>
+    <string name="lang_zh_tw">繁體中文</string>
+    <string name="lang_en">English</string>
+
+    <string name="error_prefix">[Error] %1$s</string>
+
+    <string name="notification_channel_name">PhoneSpeaker streaming</string>
+    <string name="notification_title">PhoneSpeaker is playing PC audio</string>
+    <string name="notification_text_waiting">Waiting for PC to connect…</string>
+    <string name="notification_text_streaming">Streaming</string>
 </resources>

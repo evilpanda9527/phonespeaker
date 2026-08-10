@@ -38,6 +38,19 @@
             android:exported="false"
             android:foregroundServiceType="mediaPlayback" />
 
+        <!-- 讓 AppCompatDelegate.setApplicationLocales() 選的手動語言偏好
+             自動持久化（appcompat 官方作法，todo010）：API 33 以下沒有系統
+             層級的 per-app language 儲存，appcompat 改用這個從不啟動的
+             service 當儲存媒介；service 本身永遠不會真的被啟動。 -->
+        <service
+            android:name="androidx.appcompat.app.AppLocalesMetadataHolderService"
+            android:enabled="false"
+            android:exported="false">
+            <meta-data
+                android:name="autoStoreLocales"
+                android:value="true" />
+        </service>
+
     </application>
 
 </manifest>
