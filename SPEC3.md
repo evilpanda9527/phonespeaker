@@ -289,3 +289,25 @@ Android：優先 SDK 內建（`NsdManager`、`AudioTrack`、Foreground Service�
   **【todo07-3 補充觀察】**：實測確認**只有 WiFi 會偶爾雜音，USB（USB 網路共享）沒有**——支持「WiFi 傳輸 underrun」這個猜測（USB 網路共享的傳輸更穩定/低抖動）。**先記著、暫不處理**，待使用者確認是否要修再排。
   **【todo07-4 已嘗試修正，待實測確認】**：依上述猜測針對 underrun 調大 ring buffer。改成依 transport 分開設定 target（`StreamerService.kt` 的 `ringBufferTargetMsFor()`）：**WiFi 從 60ms 提高到 100ms**（§9 允許的「必要時」上限，換一點延遲空間吸收 WiFi 抖動）；**USB（RNDIS）維持 60ms 不變**（已驗收通過、延遲表現好，不因為修 WiFi 而讓它跟著變動）。underrun 補償邏輯本身（`AudioPlayer.kt` 的 `feederLoop`——逾時就補一段固定 20ms 靜音，不會跳接/接錯資料造成爆音）確認維持不變、沒有回歸風險。只改 `android/app/src/main/java/com/phonespeaker/app/StreamerService.kt`、`.../core/RingBuffer.kt`（僅註解，換算邏輯本身沒動），未動協定層、transport 連線邏輯、PC 端、§16-4 剛根治的停止/生命週期。**待使用者實機測試：WiFi 放長音樂確認雜音是否明顯減少/消失、USB 重測一次確認延遲沒明顯變差，再回頭視結果決定是否要再往上調或改用其他做法。**
 - **zeroconf 關閉偶爾慢／`WinError 59`（Python 3.14）**：todo07-2 診斷停止逾時時發現，`transport.disconnect()` 內的 `zeroconf.unregister_service()`／`close()` 偶爾耗時約 3 秒，log 伴隨 `asyncio`/`zeroconf` 內部 proactor event loop 的 `[WinError 59] 出现了意外的网络错误` traceback（Python 3.14 + zeroconf 的已知組合問題）。**已確認跟 §16-4 停止逾時（`stream-engine` 主迴圈卡死）是不同機制、不同源**（前者是 zeroconf 函式庫自己耗時，後者是 GUI 跨執行線呼叫互卡），故未一併修。**先記著、暫不處理**，待使用者確認是否要修再排。
+
+---
+
+## 17. 最終定位（使用者確認，2026-08-11，todo010）
+
+- **專案性質**：開源專案，放上 GitHub public 供人下載自用；**不上架 Google Play，Android 端自簽**。
+- **傳輸方式定案（三種）**：**WiFi ＋ USB（USB 網路共享，U1）＋ USB（adb，U2）**。
+  - **BT 不做**：實機查證手機無可用 A2DP Sink。
+  - **USB U3（AOA）不做**：Windows 11 libwdi 驅動 blocker（見 `U3_AOA_POC_REPORT.md`）。
+- **介面語言**：支援**繁體中文 + 英文**（PC 與 Android 雙端），詳見 §18。
+- **開發方式**：本專案**使用 Claude Code 開發**。
+
+## 18. 介面雙語（zh-TW / en，todo010）
+
+- PC（customtkinter）與 Android 兩端各自實作語言資源，結構清楚、方便日後加語言：
+  - PC：`pc/i18n.py`（字典式資源 + `t(key, **kwargs)`）。
+  - Android：標準 `res/values`（英文，預設 fallback）＋ `res/values-zh` ／ `res/values-zh-rTW`（繁中）。
+- **語言選擇**：預設跟隨系統語言（系統為中文 → 繁中，其餘 → 英文），介面另提供手動切換（下拉選單），手動選擇會記住、下次啟動沿用。
+  - PC：選擇存進 `pc/config.json`（已在 `.gitignore`）。
+  - Android：透過 `AppCompatDelegate.setApplicationLocales()`，appcompat 自動持久化（`AndroidManifest.xml` 內宣告 `AppLocalesMetadataHolderService` 的 `autoStoreLocales` meta-data）。
+- **範圍**：僅涵蓋介面文字層（按鈕、狀態、傳輸選項提示、GUI 自身組出的 log 訊息如「已啟動/已停止」）。**`pc/core/stream_engine.py` 與 Android `StreamerService.kt`（SPEC3 §13 標記的凍結核心層）內部約 10 處操作型 log 訊息（等待連線／FORMAT／READY／斷線重連／錯誤等）本批刻意不動、維持中文**——使用者已確認此範圍界線，避免觸發 §10.4 對核心層的回歸要求；留待未來批次視需要再處理。
+- **WiFi 選擇提示**：比照既有 U1/U2 提示樣式，選到 WiFi 時顯示「PC 與手機需連線至同一個 WiFi 網路」（雙語）。
