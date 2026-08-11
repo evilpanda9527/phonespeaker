@@ -1,6 +1,20 @@
+import java.io.FileInputStream
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+}
+
+// Release 簽章金鑰（todo010-1）：從一個不進 git 的 keystore.properties 讀，
+// 格式見 README。故意不把 keystore/密碼放進版控——每個建置者（含你自己）
+// 用自己的 keytool 產生一把即可，不影響原始碼本身可完整公開建置。
+val keystorePropertiesFile = file("keystore.properties")
+val hasKeystoreProperties = keystorePropertiesFile.exists()
+val keystoreProperties = Properties().apply {
+    if (hasKeystoreProperties) {
+        load(FileInputStream(keystorePropertiesFile))
+    }
 }
 
 android {
@@ -14,7 +28,20 @@ android {
         minSdk = 26
         targetSdk = 34
         versionCode = 1
-        versionName = "0.1.0-m1a-wifi-poc"
+        // todo010-1：WiFi + U1 + U2 三種傳輸與雙語都已驗收完成，改用正式版號
+        // （不再用開發階段代號），跟 PC 端 installer.iss 的版本對齊。
+        versionName = "1.0.0"
+    }
+
+    signingConfigs {
+        if (hasKeystoreProperties) {
+            create("release") {
+                storeFile = file(keystoreProperties["storeFile"] as String)
+                storePassword = keystoreProperties["storePassword"] as String
+                keyAlias = keystoreProperties["keyAlias"] as String
+                keyPassword = keystoreProperties["keyPassword"] as String
+            }
+        }
     }
 
     buildTypes {
@@ -24,6 +51,9 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            if (hasKeystoreProperties) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 
@@ -37,6 +67,21 @@ android {
 
     buildFeatures {
         viewBinding = true
+    }
+}
+
+// keystore.properties 不存在時，assembleRelease/bundleRelease 明確失敗並提示
+// 怎麼補（而不是默默生出一個沒簽章、裝不上真機的 APK）。用
+// taskGraph.whenReady（不是單一 task 的 doFirst）：整個 task graph 排好、
+// 任何 task 真正開始執行之前就先擋下來，不會被 release 建置鏈上其他更早
+// 執行的 task（例如 lint）蓋掉這個訊息。不影響 assembleDebug／一般
+// sync／compileDebugKotlin（todo010 已驗證過的路徑）。
+gradle.taskGraph.whenReady {
+    if (!hasKeystoreProperties && allTasks.any { it.name == "assembleRelease" || it.name == "bundleRelease" }) {
+        throw GradleException(
+            "Missing android/keystore.properties — release builds must be signed. " +
+                "See README for the keytool command to generate one."
+        )
     }
 }
 

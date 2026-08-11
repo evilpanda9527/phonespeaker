@@ -7,6 +7,7 @@ venv/
 dist/
 build/
 *.egg-info/
+*.spec
 
 # Environment & config
 .env
@@ -42,6 +43,25 @@ android/.cxx/
 *.apk
 *.aab
 
+# Android release signing (todo010-1): keystore + credentials never go in git.
+# See README for how to generate your own via keytool. Gradle resolves
+# keystore.properties relative to android/app/ (where build.gradle.kts
+# lives), so match both that and the android/ root just in case.
+keystore.properties
+*.keystore
+*.jks
+
 # Windows installer build artefacts (installer/)
 installer/*.exe
 installer/Output/
+
+# Bundled adb binaries (todo010-1): copied in at build time from the local
+# Android SDK platform-tools (Apache-2.0, redistribution allowed — see
+# THIRD_PARTY_NOTICES.md), not committed to git. NOTICE.txt is the exception,
+# kept so the license text travels with the repo even before a build has run.
+installer/resources/adb/*.exe
+installer/resources/adb/*.dll
+
+# PC/Android packaged output (e.g. top-level dist/ for release artefacts) is
+# already covered by the `dist/` rule above — attach builds to GitHub
+# Releases instead of committing them.
