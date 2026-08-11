@@ -15,11 +15,22 @@ _PC_DIR = Path(__file__).resolve().parent
 if str(_PC_DIR) not in sys.path:
     sys.path.insert(0, str(_PC_DIR))
 
+import comtypes.client  # noqa: E402  (需先調整 sys.path 才能 import)
+
+# 打包後（PyInstaller frozen exe）comtypes 預設把 COM 介面產生的 wrapper
+# 程式碼快取寫進 site-packages/comtypes/gen/，那個路徑打包後通常不可寫，
+# 是常見的 frozen + comtypes 地雷（todo010-1）。改成 None：每次執行期即時
+# 產生、不落地快取，避開寫入權限問題；開發模式下同樣適用、無副作用（只是
+# 不再快取，多花極短的產生時間）。必須在任何會觸發 COM codegen 的 import
+# （core.mute_control／core.device_monitor 用到的 pycaw）之前設定好。
+comtypes.client.gen_dir = None
+
 import config  # noqa: E402  (需先調整 sys.path 才能 import)
+import paths  # noqa: E402
 
 
 def _setup_logging() -> None:
-    log_dir = _PC_DIR / config.LOG_DIR
+    log_dir = paths.writable_data_dir() / config.LOG_DIR
     try:
         log_dir.mkdir(parents=True, exist_ok=True)
     except OSError as e:

@@ -31,6 +31,7 @@ import threading
 from typing import Optional
 
 import config
+import paths
 from core.handshake import Frame
 from core.tcp_client import ConnectionClosed
 from core.tcp_client import configure_socket_for_streaming
@@ -59,6 +60,13 @@ class AdbNotFoundError(TransportError):
 
 
 def _find_adb_executable() -> Optional[str]:
+    """優先找隨附的 adb（打包後安裝檔會放在 exe 旁的 adb/ 子目錄，見
+    todo010-1 pc/paths.py），這樣使用者不需要自己裝 Android SDK Platform-
+    Tools 或設定 PATH。找不到隨附版本時，fallback 回原本的 PATH 查找
+    （開發模式 / 使用者自行安裝 adb 的既有行為完全不變）。"""
+    bundled = paths.app_dir() / "adb" / "adb.exe"
+    if bundled.is_file():
+        return str(bundled)
     return shutil.which(config.ADB_EXECUTABLE)
 
 

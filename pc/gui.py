@@ -283,14 +283,16 @@ class App(ctk.CTk):
         # 診斷用（見 todo07-1）：量出「使用者按停止」到「engine.stop() 真的
         # 返回」的呼叫端總耗時，並在前後都印出背景執行緒清單，方便跟
         # stream_engine 內部各段的計時 log 對照。只加 log，不改行為/邏輯。
-        # （診斷用文字比照 core 層的診斷 log，本批刻意不雙語化，見 SPEC3 §18。）
+        # （診斷用文字比照 core 層的診斷 log，本批刻意不雙語化，見 SPEC3 §18。
+        # todo010-1：發佈版不在畫面 log 區顯示這行工程調試字樣，但仍寫進
+        # pc/logs/app.log，供之後排查問題用——只拿掉 self._append_log()，
+        # logger.info() 完全不動。）
         if self._engine is not None:
             t0 = time.monotonic()
             self._engine.stop()
             elapsed = time.monotonic() - t0
             msg = f"[停止診斷] GUI _stop_engine(): engine.stop() 呼叫端總耗時 {elapsed * 1000:.0f}ms"
             logger.info(msg)
-            self._append_log(msg)
             self._engine = None
         self._active_transport = None
         self._running = False

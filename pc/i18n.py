@@ -18,14 +18,19 @@ import ctypes
 import json
 import locale
 import logging
-from pathlib import Path
 from typing import Optional
+
+import paths
 
 logger = logging.getLogger(__name__)
 
 # 語言偏好設定（"auto" / "zh-TW" / "en"）存放位置；跟 pc/config.py（開發者
 # 預設值）不同檔——這個是「使用者可調、會被程式寫回」的執行期設定。
-_SETTINGS_FILE = Path(__file__).resolve().parent / "config.json"
+# 用 paths.writable_data_dir()（todo010-1）而非直接算腳本旁邊的路徑：
+# 打包後（frozen exe）通常裝在 Program Files，一般使用者權限寫不進去，
+# 要改寫到 %LOCALAPPDATA%；開發模式下這個函式回傳的路徑跟改動前完全一樣
+# （還是 pc/ 底下），行為不變。
+_SETTINGS_FILE = paths.writable_data_dir() / "config.json"
 
 # 實際可用的介面語言（"auto" 不是介面語言本身，是一種「偏好」，解析後一定
 # 會落到下面兩者之一）。
