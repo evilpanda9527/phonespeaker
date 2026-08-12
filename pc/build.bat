@@ -19,8 +19,17 @@ REM onedir (not onefile): faster startup (no self-extraction each run) and
 REM less likely to trip Windows SmartScreen / antivirus heuristics, which
 REM commonly flag onefile's self-extracting bootloader.
 
-REM todo011: U2 前置狀態主動偵測（新功能，feat）MINOR bump（使用者確認合併一版）。
-set VERSION=1.1.0
+REM todo011: U2 proactive pre-connect state detection (feat) -- MINOR bump
+REM (user confirmed merging this with the Android-only lifecycle fix into
+REM one release). NOTE: this comment must stay ASCII-only, see the note
+REM above -- non-ASCII text here previously broke cmd.exe's tokenizer.
+REM
+REM todo011 follow-up: PATCH bump -- the REM comment right above this one
+REM used to contain Traditional Chinese and broke cmd.exe's tokenizer,
+REM making this script fail to run at all (see the ASCII-only note near
+REM the top of this file). Fixed by rewriting that comment in ASCII; no
+REM app code changed, PC-build-script fix only, hence PATCH not MINOR.
+set VERSION=1.1.1
 set ZIPNAME=PhoneSpeaker-PC-portable-v%VERSION%.zip
 
 if not exist .venv\Scripts\python.exe (
