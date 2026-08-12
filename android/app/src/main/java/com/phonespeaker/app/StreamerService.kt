@@ -127,6 +127,31 @@ class StreamerService : Service() {
         super.onDestroy()
     }
 
+    /**
+     * todo011 §1 修 bug：使用者用系統「關閉所有 / 清除最近使用」把 app 從
+     * 最近工作清單滑掉時觸發（單純切到背景、或螢幕關閉都**不會**呼叫這個
+     * callback——只有 task 真的被移除才會，這正是我們要抓的「使用者明確
+     * 要結束串流」意圖，跟正常背景/鎖屏續播是兩回事，見 §9/§13 已驗收行為
+     * 不變）。
+     *
+     * 這個 service 是 startForegroundService() 啟動、onBind() 回 null 的
+     * 純 started service（沒有任何 Activity bind 它），預設（沒設定
+     * `android:stopWithTask`）系統不會自動停掉它，導致：
+     * (a) 串流中被清掉 → 前景服務留著繼續播放，聲音不會停；
+     * (b) 閒置中被清掉 → 服務其實還活著，只是 Activity/UI 被系統殺掉重建，
+     *     重新開 app 只是重新綁到還存活的服務，畫面誤顯示「已啟動」。
+     *
+     * 修法：比照一般前景服務 app（音樂播放器等）的標準作法，在這裡明確
+     * 停止 engine、斷開 transport、釋放資源、結束 service——跟使用者按
+     * 「停止」走的是同一條收尾路徑（[stopEngine]），行為一致。
+     */
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        Log.i(TAG, "onTaskRemoved：使用者關閉所有/清除最近使用，視為明確停止串流")
+        stopEngine()
+        stopSelf()
+        super.onTaskRemoved(rootIntent)
+    }
+
     // ------------------------------------------------------------------ //
     // 生命週期
     // ------------------------------------------------------------------ //
