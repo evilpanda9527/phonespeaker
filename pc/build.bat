@@ -19,7 +19,7 @@ REM onedir (not onefile): faster startup (no self-extraction each run) and
 REM less likely to trip Windows SmartScreen / antivirus heuristics, which
 REM commonly flag onefile's self-extracting bootloader.
 
-set VERSION=1.0.0
+set VERSION=1.0.1
 set ZIPNAME=PhoneSpeaker-PC-portable-v%VERSION%.zip
 
 if not exist .venv\Scripts\python.exe (
@@ -34,8 +34,17 @@ echo Installing dependencies...
 .venv\Scripts\python.exe -m pip install -r requirements.txt
 .venv\Scripts\python.exe -m pip install pyinstaller
 
-echo Cleaning previous build...
-rmdir /s /q dist build 2>nul
+REM NOTE (todo010-4 incident): this used to be `rmdir /s /q dist build`, which
+REM wiped the ENTIRE dist\ folder every run -- including previously delivered
+REM zips from earlier versions (e.g. PhoneSpeaker-PC-portable-v1.0.0.zip),
+REM with no Recycle Bin/git safety net since dist\ is gitignored. Never
+REM delete old delivered files: only clean the PyInstaller intermediates
+REM (build\) and the unzipped onedir tree (dist\PhoneSpeaker\) that this
+REM script regenerates from scratch every time -- leave any *.zip already
+REM sitting in dist\ (older versions) untouched.
+echo Cleaning previous build (keeping previously delivered zips in dist\)...
+rmdir /s /q build 2>nul
+rmdir /s /q dist\PhoneSpeaker 2>nul
 
 echo Building (onedir)...
 REM --collect-all customtkinter: theme json / font assets (customtkinter's
@@ -75,7 +84,9 @@ xcopy /y /i ..\installer\resources\adb\*.* dist\PhoneSpeaker\adb\ >nul
 :after_adb
 
 echo Zipping portable package...
-del dist\%ZIPNAME% 2>nul
+REM -Force overwrites dist\%ZIPNAME% in place if it already exists (rebuilding
+REM the same version) -- no separate `del` step, so this script never deletes
+REM a *different* version's zip sitting in dist\.
 powershell -NoProfile -Command "Compress-Archive -Path 'dist\PhoneSpeaker' -DestinationPath 'dist\%ZIPNAME%' -Force"
 
 if not exist dist\%ZIPNAME% (
