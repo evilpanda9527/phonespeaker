@@ -50,6 +50,7 @@ adb 指令實際把它啟動起來」中間的極短空檔被别的程式一起�
 from __future__ import annotations
 
 import dataclasses
+import enum
 import logging
 import os
 import shutil
@@ -85,6 +86,61 @@ class _AdbDevice:
 
 class AdbNotFoundError(TransportError):
     """PATH 裡找不到 adb 執行檔時拋出（§11 之前先假設使用者自行安裝好）。"""
+
+
+class AdbState(enum.Enum):
+    """todo011 §2：U2 前置狀態偵測——把 `adb devices` 的結果收斂成使用者
+    看得懂的三種狀態（跟手機端 log 顯示邏輯一一對應，見本檔 [probe_state]
+    docstring）。"""
+
+    NOT_FOUND = "not_found"  # 情況 1：完全沒偵測到裝置（含 adb 逾時/失敗，一律視同找不到）
+    UNAUTHORIZED = "unauthorized"  # 情況 2：偵測到裝置但尚未在手機上按「允許」
+    READY = "ready"  # 情況 3：至少一台已授權（state == "device"），可以連線
+
+
+# 跟 [AdbState] 三種狀態一一對應的使用者訊息，供 connect() 失敗路徑跟
+# [probe_state] 共用同一份文字，避免兩處各寫一次、日後改一邊漏改另一邊。
+# READY 沒有對應訊息：就緒不顯示警告（見 todo011 §2 一）。
+_MSG_NOT_FOUND = "請確認手機已用 USB 連接電腦，並開啟「USB 偵錯」（開發人員選項）。"
+_MSG_UNAUTHORIZED = "請在手機上點擊「允許 USB 偵錯」的授權對話框（若沒跳出過，拔掉 USB 線重插一次）。"
+
+
+def _classify_devices(devices: list[_AdbDevice]) -> AdbState:
+    """把 `adb devices` 列出的裝置清單分類成 [AdbState]。跟裝置數量無關，
+    只要有一台已授權就視為就緒；沒有已授權但有未授權的就是「等待授權」；
+    其餘（含完全沒有裝置、或只有 offline 等其他過渡態）一律視同「找不到
+    裝置」——這三種是使用者實際會看到、會採取行動的狀態，其餘細節只留在
+    log 裡（見呼叫端）。"""
+    if any(d.state == "device" for d in devices):
+        return AdbState.READY
+    if any(d.state == "unauthorized" for d in devices):
+        return AdbState.UNAUTHORIZED
+    return AdbState.NOT_FOUND
+
+
+def probe_state(timeout: float = None) -> AdbState:
+    """todo011 §2：U2 前置狀態主動偵測——只查詢 `adb devices`、不建立任何
+    連線或 `adb reverse` 規則，供 GUI 每隔數秒呼叫一次、即時顯示對應提示
+    （見 pc/gui.py 的 U2 偵測輪詢）。
+
+    刻意跟 [UsbAdbTransport.connect] 分開、不管 adb server 生命週期收尾
+    （不呼叫 `adb kill-server`）：todo010-4 那個孤兒 adb.exe 問題的根因是
+    「建立過 `adb reverse` 規則、裝置後來斷線，殘留的規則讓 adb server
+    持續對著已消失的裝置跳警告」——這裡從頭到尾只讀 `adb devices`、從不
+    建立任何規則，就算持續呼叫這個函式順帶讓 adb server 保持啟動，也只是
+    等同使用者自己在命令列反覆打 `adb devices`，是 adb 本身的正常行為，
+    不會重現那個孤兒規則的情境，不需要特別收尾。"""
+    if timeout is None:
+        timeout = config.ADB_COMMAND_TIMEOUT_S
+    adb_path = _find_adb_executable()
+    if adb_path is None:
+        return AdbState.NOT_FOUND
+    try:
+        devices = _list_adb_devices(adb_path, timeout)
+    except TransportError as e:
+        logger.debug("probe_state(): %s（歸類為 not_found）", e)
+        return AdbState.NOT_FOUND
+    return _classify_devices(devices)
 
 
 def _adb_server_port() -> int:
@@ -139,17 +195,25 @@ def _run_adb(adb_path: str, args: list[str], timeout: float) -> subprocess.Compl
 
 
 def _list_adb_devices(adb_path: str, timeout: float) -> list[_AdbDevice]:
-    """回傳 `adb devices` 列出的所有裝置（含未授權/離線的，讓呼叫端自行判斷要不要用）。"""
+    """回傳 `adb devices` 列出的所有裝置（含未授權/離線的，讓呼叫端自行判斷要不要用）。
+
+    todo011 §2：逾時／指令本身失敗這幾種情況，使用者看到的都應該是「情況1：
+    找不到裝置」那句清楚指引，而不是技術性的逾時錯誤字樣——技術細節（逾時
+    秒數、stderr 等）改成寫進 log，供之後排查問題用，不再進到拋給使用者看
+    的例外訊息裡。"""
     try:
         result = _run_adb(adb_path, ["devices"], timeout)
     except subprocess.TimeoutExpired as e:
-        raise TransportError(f"執行 `adb devices` 逾時（{timeout}s）: {e}") from e
+        logger.warning("執行 `adb devices` 逾時（%.1fs）: %s", timeout, e)
+        raise TransportError(_MSG_NOT_FOUND) from e
     except OSError as e:
-        raise TransportError(f"執行 `adb devices` 失敗: {e}") from e
+        logger.warning("執行 `adb devices` 失敗: %s", e)
+        raise TransportError(_MSG_NOT_FOUND) from e
     if result.returncode != 0:
-        raise TransportError(
-            f"`adb devices` 回傳非 0（{result.returncode}）: {result.stderr.strip()}"
+        logger.warning(
+            "`adb devices` 回傳非 0（%d）: %s", result.returncode, result.stderr.strip()
         )
+        raise TransportError(_MSG_NOT_FOUND)
 
     devices: list[_AdbDevice] = []
     # 第一行固定是 "List of devices attached" 標題，跳過。
@@ -229,17 +293,17 @@ class UsbAdbTransport(Transport):
         if not usable:
             self._kill_adb_server_if_owned(adb_path)
             if devices:
-                detail = "、".join(f"{d.serial}({d.state})" for d in devices)
-                raise TransportError(
-                    "adb 有偵測到裝置，但狀態不是「已授權」："
-                    f"{detail}。請確認手機上彈出的「允許 USB 偵錯」對話框已按下"
-                    "允許（若沒跳出過，拔掉 USB 線重插一次），再試一次。"
+                # 情況 1/2 的詳細裝置清單只寫進 log（供排查），使用者看到的
+                # 例外訊息統一用 _MSG_NOT_FOUND / _MSG_UNAUTHORIZED 兩句固定
+                # 文字（todo011 §2，跟 [probe_state] 共用同一份分類與文字）。
+                logger.info(
+                    "adb 偵測到裝置但目前無法使用: %s",
+                    "、".join(f"{d.serial}({d.state})" for d in devices),
                 )
-            raise TransportError(
-                "adb 沒有偵測到任何裝置。請確認：① 手機已用 USB 連接這台電腦、"
-                "② 手機「開發人員選項」裡的「USB 偵錯」已開啟、③ 手機端跳出的"
-                "授權對話框已按下允許。"
-            )
+            state = _classify_devices(devices)
+            if state is AdbState.UNAUTHORIZED:
+                raise TransportError(_MSG_UNAUTHORIZED)
+            raise TransportError(_MSG_NOT_FOUND)
         if len(usable) > 1:
             logger.warning(
                 "adb 偵測到多台已授權裝置，PhoneSpeaker 目前只支援單一裝置"

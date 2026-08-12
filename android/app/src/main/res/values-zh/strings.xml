@@ -41,6 +41,11 @@
     <string name="hint_transport_usb_rndis">請先在手機開啟「USB 網路共享 / USB tethering」。</string>
     <string name="hint_transport_usb_adb">請先在手機開啟「USB 偵錯」（開發者選項）。</string>
 
+    <!-- todo011 §2 二：U1 主動偵測到「USB 網路共享尚未開啟」時顯示的即時
+         提示（取代上面 hint_transport_usb_rndis 這句固定文字）；偵測到已
+         開啟時不顯示警告，畫面留空，見 MainActivity refreshTransportHint()。 -->
+    <string name="hint_usb_tethering_off">「USB 網路共享」目前尚未開啟，請先在手機開啟。</string>
+
     <!-- 語言選單選項（todo010）："繁體中文"/"English" 用語言自身名稱顯示，
          跟目前介面語言無關；只有「自動」跟著目前介面語言變化. -->
     <string name="lang_auto">自動（跟隨系統）</string>

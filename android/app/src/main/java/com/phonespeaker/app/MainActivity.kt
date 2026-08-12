@@ -16,6 +16,10 @@ import androidx.core.os.LocaleListCompat
 import com.phonespeaker.app.core.AudioFormat
 import com.phonespeaker.app.databinding.ActivityMainBinding
 
+/** todo011 §2 二：U1 主動偵測輪詢間隔。跟 PC 端 U2 偵測（pc/gui.py 的
+ * `_ADB_POLL_INTERVAL_S`）用同樣的 2 秒，兩邊即時感一致。 */
+private const val TETHERING_POLL_INTERVAL_MS = 2000L
+
 /**
  * MainActivity.kt — 最小 UI：transport 選擇、啟動/停止、狀態、格式、log。
  *
@@ -32,6 +36,19 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
     private var running = false
+
+    /**
+     * todo011 §2 二：U1（[TransportMode.USB_RNDIS]）主動偵測狀態——
+     * `null`＝還沒偵測出結果（沿用靜態提示當 placeholder，見
+     * [refreshTransportHint]），偵測到結果後改顯示對應狀態。只在「選到 U1
+     * 且目前閒置」時輪詢（見 [syncTetheringPoll]），避免無意義地一直背景
+     * 查詢網路介面。輪詢本身用 daemon 背景執行緒＋[runOnUiThread] 更新，
+     * 不會阻塞任何主執行緒操作（跟 PC 端 pc/gui.py 的 U2 偵測輪詢是對稱
+     * 設計）。
+     */
+    private var tetheringOn: Boolean? = null
+    private var tetheringPollThread: Thread? = null
+    @Volatile private var tetheringPollStop = false
 
     /**
      * 顯示文字（跟 PC 端 pc/i18n.py 的 transport.<id>.name 對齊） → TransportMode。
@@ -68,6 +85,79 @@ class MainActivity : AppCompatActivity() {
         TransportMode.WIFI -> getString(R.string.hint_transport_wifi)
         TransportMode.USB_RNDIS -> getString(R.string.hint_transport_usb_rndis)
         TransportMode.USB_ADB -> getString(R.string.hint_transport_usb_adb)
+    }
+
+    /**
+     * todo011 §2 二：重繪提示文字的單一進入點。U1 且已經偵測出結果時顯示
+     * 主動偵測到的即時狀態（[tetheringHintText]），其餘情況（其他
+     * transport、或 U1 還沒偵測出結果）維持原本 todo08-1 的靜態引導提示，
+     * 行為不變。
+     */
+    private fun refreshTransportHint() {
+        val mode = transportOptions.getOrNull(binding.transportSpinner.selectedItemPosition)?.second
+            ?: return
+        val onState = tetheringOn
+        binding.transportHintText.text = if (mode == TransportMode.USB_RNDIS && onState != null) {
+            tetheringHintText(onState)
+        } else {
+            transportHintFor(mode)
+        }
+    }
+
+    private fun tetheringHintText(on: Boolean): String =
+        if (on) "" else getString(R.string.hint_usb_tethering_off) // 情況二：已開啟，不顯示警告
+
+    /**
+     * todo011 §2 二：依「目前選到的 transport」＋「目前是否在跑」決定 U1
+     * 主動偵測輪詢該不該啟動——只有「選到 U1 且閒置(未啟動)」才跑，串流中
+     * 或選別的 transport 都停掉，避免無意義的背景查詢。呼叫時機：下拉選單
+     * 選擇變更、[renderState]（涵蓋啟動/停止/onResume 重新整理畫面）。
+     */
+    private fun syncTetheringPoll() {
+        val mode = transportOptions.getOrNull(binding.transportSpinner.selectedItemPosition)?.second
+        if (!running && mode == TransportMode.USB_RNDIS) {
+            startTetheringPoll()
+        } else {
+            stopTetheringPoll()
+        }
+        refreshTransportHint()
+    }
+
+    private fun startTetheringPoll() {
+        if (tetheringPollThread != null) return
+        tetheringPollStop = false
+        val thread = Thread({ tetheringPollLoop() }, "tethering-poll")
+        thread.isDaemon = true
+        tetheringPollThread = thread
+        thread.start()
+    }
+
+    private fun stopTetheringPoll() {
+        // 只設旗標、不 join()：輪詢執行緒是 daemon、且迴圈本身只做很快的
+        // NetworkInterface 列舉（不會卡在任何阻塞 I/O），呼叫端不需要、也
+        // 不應該等它結束（比照 PC 端 §16-4 教訓：呼叫端絕不能等背景執行緒）。
+        tetheringPollStop = true
+        tetheringPollThread = null
+        tetheringOn = null
+    }
+
+    private fun tetheringPollLoop() {
+        while (!tetheringPollStop) {
+            val on = UsbTetheringDetector.isUsbTetheringOn()
+            if (!tetheringPollStop) {
+                runOnUiThread {
+                    if (!tetheringPollStop) {
+                        tetheringOn = on
+                        refreshTransportHint()
+                    }
+                }
+            }
+            try {
+                Thread.sleep(TETHERING_POLL_INTERVAL_MS)
+            } catch (e: InterruptedException) {
+                break
+            }
+        }
     }
 
     private val notificationPermissionLauncher =
@@ -110,12 +200,12 @@ class MainActivity : AppCompatActivity() {
         )
         binding.transportSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
-                binding.transportHintText.text = transportHintFor(transportOptions[position].second)
+                syncTetheringPoll()
             }
 
             override fun onNothingSelected(parent: AdapterView<*>?) {}
         }
-        binding.transportHintText.text = transportHintFor(transportOptions[0].second)
+        syncTetheringPoll()
 
         binding.startStopButton.setOnClickListener { onToggleStartStop() }
 
@@ -173,6 +263,10 @@ class MainActivity : AppCompatActivity() {
 
     override fun onPause() {
         StreamerService.listener = null
+        // todo011 §2 二：Activity 不在前景時沒有 UI 好更新，停掉 U1 偵測
+        // 輪詢；onResume() 會透過 renderState() → syncTetheringPoll() 視當時
+        // 選到的 transport／running 狀態決定要不要重新啟動。
+        stopTetheringPoll()
         super.onPause()
     }
 
@@ -205,6 +299,10 @@ class MainActivity : AppCompatActivity() {
             ServiceState.STREAMING -> getString(R.string.status_streaming)
             ServiceState.STOPPED -> getString(R.string.status_stopped)
         }
+        // todo011 §2 二：running 剛更新完，這裡是唯一保證「啟動/停止/
+        // onResume 重新整理畫面」都會經過的地方，藉此決定 U1 主動偵測輪詢
+        // 該開該關（見 syncTetheringPoll 說明）。
+        syncTetheringPoll()
     }
 
     private fun appendLog(message: String) {
