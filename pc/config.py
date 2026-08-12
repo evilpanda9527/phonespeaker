@@ -25,6 +25,17 @@ ADB_EXECUTABLE: str = "adb"
 ADB_HOST: str = "127.0.0.1"
 ADB_COMMAND_TIMEOUT_S: float = 5.0
 
+# adb server（adb 常駐背景 daemon，就是工作管理員裡那個 `adb.exe`）預設監聽
+# 的本機 TCP port。connect() 前用它探測「這次連線前 adb server 是不是已經
+# 在跑」，藉此判斷 disconnect() 收尾時能不能安全地 `adb kill-server`——只清
+# 理「本程式為了 U2 啟動的」adb server，不誤殺使用者自己開著的（例如
+# Android Studio）（見 todo010-4，usb_adb.py 的取捨說明）。使用者若透過
+# `ANDROID_ADB_SERVER_PORT` 環境變數自訂了 port，usb_adb.py 會改讀那個值，
+# 這裡的數字只是 adb 官方預設值。
+ADB_SERVER_HOST: str = "127.0.0.1"
+ADB_SERVER_PORT: int = 5037
+ADB_SERVER_PROBE_TIMEOUT_S: float = 0.3
+
 # --- Ring buffer / 延遲 target（§9，PC 端僅用於顯示 estimated 延遲）---
 RING_BUFFER_TARGET_MS_MIN: int = 20
 RING_BUFFER_TARGET_MS_MAX: int = 60

@@ -17,6 +17,34 @@ TCP server、手機當 TCP client」（wifi.py／usb_rndis.py 皆如此）。adb
 reverse 轉發規則，再開 TCP server 等 client」。TCP accept/send/recv 這段
 跟其他兩個 transport 看起來重複，是刻意的取捨（§10.3 檔案隔離：這是 U2
 專屬檔案，不 import／不修改 wifi.py、usb_rndis.py 的任何內部邏輯）。
+
+**adb server 生命週期（todo010-4 修 bug）：** 第一次對 adb 下指令（例如
+`adb devices`）時，如果 adb server（一個常駐背景執行的 `adb.exe`）還沒在
+跑，adb 會自動 fork 一個起來、然後繼續留著跑，不會跟著當次指令的 client
+process 一起結束。這個 app 原本只在 disconnect() 移除 `adb reverse` 規則，
+從沒主動關過這個常駐的 server process，於是每次 U2 連線都會留下一個孤兒
+`adb.exe`：關閉 app／拔 USB 後它還在，繼續對已經斷線的裝置輪詢，每隔一段
+時間跳出 Windows「該設備已停止響應或已斷開連接」的警告。
+
+修法：connect() 一開始、還沒對 adb 下任何指令之前，先探測 adb server 是否
+已經在監聽（見 `_is_adb_server_listening()`）。
+
+- 沒在監聽 → 這次連線期間用到的 adb server 一定是**我們自己**啟動的，
+  disconnect() 收尾（或 connect() 中途失敗）時就負責 `adb kill-server`
+  把它關掉，不留孤兒。
+- 已經在監聽 → 代表使用者自己另外有 adb server 在跑（例如開著 Android
+  Studio、或手動执行過 adb 指令），這種情況下**不會**呼叫 kill-server，
+  避免把不屬於我們啟動的 server 也一併殺掉、影響到使用者其他的 adb 工作
+  流程。
+
+**已知取捨（技術上無法百分之百精準區分「這個 server 是不是我們啟的」）：**
+如果使用者的 adb server 剛好在「我們探測完、判定沒在跑」跟「我們自己那次
+adb 指令實際把它啟動起來」中間的極短空檔被别的程式一起用上，我們收尾時的
+`adb kill-server` 還是會把它關掉——這裡優先選擇「不留孤兒 process／不留
+斷線警告」，而不是絕對保守。另外，`adb kill-server` 沒有「只殺這個 client
+建立的規則」這種粒度，指令本身就是整台機器唯一一份 adb server 的開關；
+一旦判定要關，就是關掉整個 server（連同其他裝置的 adb reverse/forward
+規則都會一起消失），這點會影響到系統整體的 adb 使用者，請知悉。
 """
 
 from __future__ import annotations
@@ -57,6 +85,36 @@ class _AdbDevice:
 
 class AdbNotFoundError(TransportError):
     """PATH 裡找不到 adb 執行檔時拋出（§11 之前先假設使用者自行安裝好）。"""
+
+
+def _adb_server_port() -> int:
+    """回傳 adb server 監聽的 port。使用者可能透過 `ANDROID_ADB_SERVER_PORT`
+    環境變數自訂（adb 官方支援的用法）；我們的探測跟實際下 adb 指令用的是
+    同一個 process 環境，兩邊要看同一個 port 才會判斷一致，所以這裡也讀
+    同一個環境變數，沒設定才退回官方預設值 `config.ADB_SERVER_PORT`。"""
+    raw = os.environ.get("ANDROID_ADB_SERVER_PORT", "").strip()
+    if raw:
+        try:
+            return int(raw)
+        except ValueError:
+            logger.warning(
+                "ANDROID_ADB_SERVER_PORT=%r 不是合法的數字，改用預設 port %d",
+                raw, config.ADB_SERVER_PORT,
+            )
+    return config.ADB_SERVER_PORT
+
+
+def _is_adb_server_listening() -> bool:
+    """探測 adb server 是不是已經在監聽（見本檔開頭「adb server 生命週期」
+    說明）。只是短逾時的 TCP connect 探測，不牽動 adb 本身。"""
+    try:
+        with socket.create_connection(
+            (config.ADB_SERVER_HOST, _adb_server_port()),
+            timeout=config.ADB_SERVER_PROBE_TIMEOUT_S,
+        ):
+            return True
+    except OSError:
+        return False
 
 
 def _find_adb_executable() -> Optional[str]:
@@ -128,6 +186,12 @@ class UsbAdbTransport(Transport):
         self._adb_path: Optional[str] = None
         self._serial: Optional[str] = None
 
+        # todo010-4：這次 connect() 用到的 adb server 是不是我們自己啟動
+        # 的（connect() 一開始探測、disconnect()／連線失敗收尾時消費）。
+        # 只有 True 時，收尾才會呼叫 `adb kill-server`，避免誤殺使用者自己
+        # 開著的 adb server（見本檔開頭說明）。
+        self._server_owned_by_us: bool = False
+
     @property
     def display_name(self) -> str:
         return "USB (adb)"
@@ -149,9 +213,21 @@ class UsbAdbTransport(Transport):
                 "執行 `adb version` 成功後再試一次。"
             )
 
-        devices = _list_adb_devices(adb_path, config.ADB_COMMAND_TIMEOUT_S)
+        # todo010-4：還沒對 adb 下任何指令之前先探測——沒在監聽就代表接下來
+        # 任何一個 adb 指令（`adb devices`／`adb reverse`）若真的觸發 adb
+        # 自動啟動 server，那個 server 就是「我們啟動的」，收尾時要負責關掉
+        # （見本檔開頭「adb server 生命週期」說明）。
+        self._server_owned_by_us = not _is_adb_server_listening()
+
+        try:
+            devices = _list_adb_devices(adb_path, config.ADB_COMMAND_TIMEOUT_S)
+        except TransportError:
+            self._kill_adb_server_if_owned(adb_path)
+            raise
+
         usable = [d for d in devices if d.state == "device"]
         if not usable:
+            self._kill_adb_server_if_owned(adb_path)
             if devices:
                 detail = "、".join(f"{d.serial}({d.state})" for d in devices)
                 raise TransportError(
@@ -179,6 +255,7 @@ class UsbAdbTransport(Transport):
             listen_sock.bind((self._host, self._port))
         except OSError as e:
             try_close(listen_sock)
+            self._kill_adb_server_if_owned(adb_path)
             raise TransportError(f"無法監聽 {self._host}:{self._port}: {e}") from e
         listen_sock.listen(1)
         listen_sock.settimeout(_ACCEPT_POLL_INTERVAL_S)
@@ -191,6 +268,7 @@ class UsbAdbTransport(Transport):
         except TransportError:
             try_close(listen_sock)
             self._listen_sock = None
+            self._kill_adb_server_if_owned(adb_path)
             raise
 
         accepted = False
@@ -214,8 +292,11 @@ class UsbAdbTransport(Transport):
                 self._listen_sock = None
             if not accepted:
                 # 還沒真的建立連線就結束（取消/逾時等）：adb reverse 規則
-                # 沒有用武之地了，清掉它，不留下沒人用的轉發規則。
+                # 沒有用武之地了，清掉它，不留下沒人用的轉發規則；如果這次
+                # 連線用到的 adb server 是我們啟動的，也一併關掉，不留孤兒
+                # process（todo010-4）。
                 self._adb_reverse_remove()
+                self._kill_adb_server_if_owned(adb_path)
 
     def request_cancel(self) -> None:
         sock = self._listen_sock
@@ -236,9 +317,18 @@ class UsbAdbTransport(Transport):
         with self._send_lock:
             self._conn = None
 
+        # _adb_reverse_remove() 會把 self._adb_path 清成 None，所以要在呼叫
+        # 前先留一份給後面 kill-server 用（如果這次是我們啟動的 adb server）。
+        adb_path = self._adb_path
+
         # 連線已經建立過（或正要建立）的 adb reverse 規則，這裡才是真正
         # 「這條連線结束了」的時間點，移除規則不留殘留。
         self._adb_reverse_remove()
+
+        # todo010-4：這條 U2 連線真正結束了，如果這次連線用到的 adb server
+        # 是我們自己啟動的，這裡負責關掉，不留孤兒 adb.exe 繼續對已斷線的
+        # 裝置跳「已停止響應」警告（見本檔開頭「adb server 生命週期」說明）。
+        self._kill_adb_server_if_owned(adb_path)
 
     def send_frame(self, frame: Frame) -> None:
         conn = self._conn
@@ -301,3 +391,26 @@ class UsbAdbTransport(Transport):
             # 移除失敗不該讓 disconnect() 拋例外（介面約定：disconnect() 不拋）；
             # 常見成因是手機已經拔線，adb 早已認不到這台裝置，安全忽略即可。
             logger.debug("移除 adb reverse 時發生非致命錯誤（可忽略）: %s", e)
+
+    def _kill_adb_server_if_owned(self, adb_path: Optional[str]) -> None:
+        """todo010-4：只在「這次連線用到的 adb server 是我們自己啟動的」
+        （見 connect() 開頭 `_is_adb_server_listening()` 探測）才真的執行
+        `adb kill-server`，把常駐的 adb.exe 一起結束掉，不留孤兒 process
+        持續對已斷線的裝置跳「已停止響應」警告。使用者自己另外開著的 adb
+        server（探測時就已經在監聽）完全不會被這裡動到。
+
+        `self._server_owned_by_us` 用完立刻重置為 False：disconnect() 跟
+        connect() 失敗收尾都可能呼叫到這裡，重置後才不會同一次探測結果被
+        重複消費、對一個早就關掉的 server 再呼叫一次 kill-server（雖然無害，
+        但沒必要）。
+        """
+        owned, self._server_owned_by_us = self._server_owned_by_us, False
+        if not owned or adb_path is None:
+            return
+        try:
+            _run_adb(adb_path, ["kill-server"], config.ADB_COMMAND_TIMEOUT_S)
+            logger.info("adb server 已結束（本程式為 U2 啟動的，非使用者既有的 adb server）")
+        except (subprocess.TimeoutExpired, OSError) as e:
+            # 跟 _adb_reverse_remove() 同樣的考量：不該讓 disconnect() 拋例外，
+            # 安全忽略即可（常見成因：裝置已拔線、adb 早已找不到它）。
+            logger.debug("結束 adb server 時發生非致命錯誤（可忽略）: %s", e)
