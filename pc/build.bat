@@ -19,7 +19,8 @@ REM onedir (not onefile): faster startup (no self-extraction each run) and
 REM less likely to trip Windows SmartScreen / antivirus heuristics, which
 REM commonly flag onefile's self-extracting bootloader.
 
-set VERSION=1.0.1
+REM todo011: U2 前置狀態主動偵測（新功能，feat）MINOR bump（使用者確認合併一版）。
+set VERSION=1.1.0
 set ZIPNAME=PhoneSpeaker-PC-portable-v%VERSION%.zip
 
 if not exist .venv\Scripts\python.exe (

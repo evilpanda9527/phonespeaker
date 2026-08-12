@@ -27,10 +27,12 @@ android {
         // minSdk 26 依 SPEC3.md §13。
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
+        versionCode = 2
         // todo010-1：WiFi + U1 + U2 三種傳輸與雙語都已驗收完成，改用正式版號
         // （不再用開發階段代號），跟 PC 端 installer.iss 的版本對齊。
-        versionName = "1.0.0"
+        // todo011：onTaskRemoved 生命週期 bug 修正（fix）＋ U1 主動偵測
+        // 新功能（feat）合併成本次一版，MINOR bump（使用者確認合併一版）。
+        versionName = "1.1.0"
     }
 
     signingConfigs {
