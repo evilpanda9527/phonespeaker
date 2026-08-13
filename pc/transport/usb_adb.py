@@ -143,6 +143,38 @@ def probe_state(timeout: float = None) -> AdbState:
     return _classify_devices(devices)
 
 
+def is_adb_server_listening() -> bool:
+    """[_is_adb_server_listening] 的公開版本，供 gui.py 在啟動 U2 前置偵測
+    輪詢（[probe_state]）當下記一次「adb server 是不是已經在跑」，用來
+    判斷輪詢期間若順帶啟動了 server，那顆 server 是不是我們造成的（見
+    [kill_orphaned_probe_server] docstring）。"""
+    return _is_adb_server_listening()
+
+
+def kill_orphaned_probe_server() -> None:
+    """app 關閉時呼叫（見 pc/gui.py `_on_close`）：[probe_state] 只讀
+    `adb devices`、故意不管 adb server 生命週期（見 [probe_state]
+    docstring 的取捨），如果輪詢期間 adb server 原本沒在跑、是被我們的
+    `adb devices` 呼叫順帶啟動的，那顆常駐 adb.exe 在 app 關掉後不會有
+    任何人再收尾它，繼續對已斷線的裝置跳「已停止響應」警告（跟 todo010-4
+    修的孤兒 process 是同一種症狀，只是觸發路徑換成輪詢而不是 connect()）。
+
+    呼叫端（gui.py）只在「啟動輪詢當下用 [is_adb_server_listening] 探測到
+    尚未在跑」時才會呼叫這裡收尾——判斷原則、已知取捨都跟
+    [UsbAdbTransport._kill_adb_server_if_owned] 一致（見本檔開頭「adb
+    server 生命週期」說明），這裡不重複探測、直接關。"""
+    adb_path = _find_adb_executable()
+    if adb_path is None:
+        return
+    try:
+        _run_adb(adb_path, ["kill-server"], config.ADB_COMMAND_TIMEOUT_S)
+        logger.info("app 關閉：已結束 U2 前置偵測輪詢啟動的 adb server，不留孤兒 process")
+    except (subprocess.TimeoutExpired, OSError) as e:
+        # 跟 _kill_adb_server_if_owned() 同樣的考量：不該讓 _on_close() 拋
+        # 例外擋住 app 關閉，安全忽略即可（常見成因：裝置已拔線）。
+        logger.debug("app 關閉時結束 adb server 發生非致命錯誤（可忽略）: %s", e)
+
+
 def _adb_server_port() -> int:
     """回傳 adb server 監聽的 port。使用者可能透過 `ANDROID_ADB_SERVER_PORT`
     環境變數自訂（adb 官方支援的用法）；我們的探測跟實際下 adb 指令用的是

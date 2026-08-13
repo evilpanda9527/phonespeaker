@@ -29,7 +29,16 @@ REM used to contain Traditional Chinese and broke cmd.exe's tokenizer,
 REM making this script fail to run at all (see the ASCII-only note near
 REM the top of this file). Fixed by rewriting that comment in ASCII; no
 REM app code changed, PC-build-script fix only, hence PATCH not MINOR.
-set VERSION=1.1.1
+REM
+REM bug fix (user-reported): closing the app left an orphaned adb.exe
+REM running. Root cause: todo011 U2 pre-connect state polling reads
+REM `adb devices` every few seconds while idle on the U2 tab, and if the
+REM adb server wasn't already running it gets started as a side effect --
+REM but nothing ever stopped it on app close (see
+REM transport/usb_adb.py: kill_orphaned_probe_server / probe_state).
+REM Fixed in gui.py + transport/usb_adb.py only; no other transport/
+REM protocol code touched. PATCH bump.
+set VERSION=1.1.2
 set ZIPNAME=PhoneSpeaker-PC-portable-v%VERSION%.zip
 
 if not exist .venv\Scripts\python.exe (

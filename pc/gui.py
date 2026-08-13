@@ -25,7 +25,13 @@ import config
 import i18n
 from core.stream_engine import EngineCallbacks, EngineState, StreamEngine
 from transport.base import Transport
-from transport.usb_adb import AdbState, UsbAdbTransport, probe_state as probe_adb_state
+from transport.usb_adb import (
+    AdbState,
+    UsbAdbTransport,
+    is_adb_server_listening as _adb_server_listening,
+    kill_orphaned_probe_server as _kill_orphaned_adb_probe_server,
+    probe_state as probe_adb_state,
+)
 from transport.usb_rndis import UsbRndisTransport
 from transport.wifi import WifiTransport
 
@@ -86,6 +92,15 @@ class App(ctk.CTk):
         self._adb_probe_state: Optional[AdbState] = None
         self._adb_poll_stop = threading.Event()
         self._adb_poll_thread: Optional[threading.Thread] = None
+
+        # bug fix（使用者實測回報）：U2 前置偵測輪詢若在 adb server 還沒
+        # 啟動時跑起來，會順帶把它啟動、卻從沒人收尾（[probe_state] 故意
+        # 不管 server 生命週期，見該函式 docstring）。這裡記「輪詢啟動當下
+        # server 是不是已經在跑」，True 才代表這次 app 執行期間可能是我們
+        # 自己讓它啟動的，_on_close() 才需要負責關掉，不誤殺使用者自己另外
+        # 開著的 adb server（例如 Android Studio）。一旦記到 True 就維持
+        # 到 app 關閉，不會被之後幾次「已經在跑」的輪詢重置回 False。
+        self._adb_poll_owns_server: bool = False
 
         self._build_ui()
         self._apply_language()
@@ -255,6 +270,11 @@ class App(ctk.CTk):
         跨執行緒直接呼叫 Tk 方法會互相卡住，這裡完全比照既有作法）。"""
         if self._adb_poll_thread is not None:
             return
+        # bug fix：只在還沒判定過「是我們啟動的」之前才需要探測——探測本身
+        # 是一次同步的短逾時 TCP connect，不會啟動 adb，比照 connect() 裡
+        # 同一個探測的用法（見 usb_adb.py「adb server 生命週期」說明）。
+        if not self._adb_poll_owns_server and not _adb_server_listening():
+            self._adb_poll_owns_server = True
         self._adb_poll_stop.clear()
         thread = threading.Thread(target=self._adb_poll_loop, name="adb-status-poll", daemon=True)
         self._adb_poll_thread = thread
@@ -441,6 +461,15 @@ class App(ctk.CTk):
         # 執行緒本來就會跟著 process 一起結束，這裡純粹是不留著旗標沒設的
         # 習慣性收尾，不是必要條件。
         self._stop_adb_poll()
+        # bug fix（使用者實測回報：關閉 app 後 adb.exe 還留著）：只有這次
+        # app 執行期間，U2 前置偵測輪詢真的把原本沒在跑的 adb server 啟動
+        # 起來時（見 _start_adb_poll 設 _adb_poll_owns_server 的地方）才
+        # 呼叫這裡收尾；使用者自己另外開著的 adb server 不會被動到。這裡
+        # 是同步呼叫（最長 config.ADB_COMMAND_TIMEOUT_S），在 os._exit()
+        # 之前執行完，不影響下面既有的 destroy()/os._exit() 收尾流程。
+        if self._adb_poll_owns_server:
+            _kill_orphaned_adb_probe_server()
+            self._adb_poll_owns_server = False
         self.destroy()
         # 已知問題（見 PoC 報告）：PyAudioWPatch 在這個環境下，即使整段錄音
         # 流程完全正常，Python 直譯器正常收尾（GC/atexit）時仍可能在原生
