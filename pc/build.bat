@@ -56,7 +56,42 @@ REM scenario). Removed the now-dead poll-only helpers and i18n keys.
 REM Changed gui.py, transport/usb_adb.py, i18n.py only. UX tradeoff: no more
 REM live "not authorized" hint while idle; connect() itself now takes
 REM ~1-3s longer to report failure/success on first press. PATCH bump.
-set VERSION=1.1.3
+REM
+REM todo011-5: real-device testing (with the lock/no-poll fix above already
+REM in place) surfaced two more distinct issues:
+REM 1) A genuine cold-start adb server spin-up simply takes longer than the
+REM    5.0s ADB_COMMAND_TIMEOUT_S -- measured 5.0-5.3s on this machine even
+REM    with no antivirus overhead, so `adb devices` was timing out even
+REM    though the server was about to come up successfully. Added
+REM    config.ADB_COLD_START_TIMEOUT_S=12.0, used only for the first
+REM    `adb devices` call when the server wasn't already running.
+REM 2) Task Manager showed a leftover, "Suspended" orphan adb.exe after a
+REM    failed connect -- our own bookkeeping (`adb server monitoring=False,
+REM    PID=[]`) didn't match reality: `_is_adb_server_listening()` is only a
+REM    TCP-port probe, not a process check, so a stuck child process (its
+REM    server got orphaned when we killed its controlling client on
+REM    timeout) went undetected. Added a PID-baseline snapshot at the start
+REM    of connect() and, after `adb kill-server`, a check for any adb.exe
+REM    PID that's new since that baseline and still alive -> force-killed
+REM    via `taskkill /F /T` (never touches pre-existing/unrelated adb.exe).
+REM 3) End-to-end real-phone streaming test then exposed a third, deeper
+REM    race: StreamEngine.stop() (caller's thread) and StreamEngine._run()'s
+REM    own reconnect loop (its background thread) can both call
+REM    transport.disconnect() concurrently; the module-level adb-CLI lock
+REM    added earlier only serializes the actual `adb` subprocess calls, not
+REM    UsbAdbTransport's own instance state (self._adb_path etc.) -- one
+REM    thread nulling it out before the other reads it meant NEITHER thread
+REM    actually called `adb kill-server`, leaving a real orphan (reproduced
+REM    once, confirmed via tasklist). Added an instance-level
+REM    `_disconnect_lock` around the one-shot cleanup portion of
+REM    disconnect() (not the immediate socket-cancel calls, which must stay
+REM    unblocked -- see the code comment) so only one caller ever performs
+REM    the cleanup and a concurrent second caller safely no-ops.
+REM All three fixes verified against the real connected phone (repeated
+REM cold-start connects + a full FORMAT/READY/STREAMING run), confirmed
+REM clean (zero leftover adb.exe) afterward. Changed config.py,
+REM transport/usb_adb.py only. PATCH bump.
+set VERSION=1.1.4
 set ZIPNAME=PhoneSpeaker-PC-portable-v%VERSION%.zip
 
 if not exist .venv\Scripts\python.exe (

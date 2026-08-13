@@ -25,6 +25,18 @@ ADB_EXECUTABLE: str = "adb"
 ADB_HOST: str = "127.0.0.1"
 ADB_COMMAND_TIMEOUT_S: float = 5.0
 
+# todo011-5：adb server 完全冷啟動（目前沒有 adb.exe 在跑，第一次對 adb
+# 下指令）比一般指令慢很多——adb client 自己要 fork 一個 server 行程、等它
+# 初始化到可以回話，跟一般「server 早就在跑、只是單純問一句」的情境完全
+# 不是同一個量級。實測（見 todo011-5 診斷）：即使是已安裝在系統 PATH 上、
+# 沒有防毒即時掃描負擔的 adb.exe，冷啟動也量到 5.0~5.3 秒——剛好卡在原本
+# ADB_COMMAND_TIMEOUT_S=5.0 這個臨界點上，導致「明明再等一下下就會成功」
+# 卻被判定逾時失敗。只有 connect() 一開始「確認 server 本來沒在跑」那次
+# `adb devices` 呼叫才會用這個放寬過的逾時；其餘指令（server 已經在跑時的
+# `adb devices`、`adb reverse`、`kill-server`）都是跟已經在跑的 server
+# 對話，維持原本 ADB_COMMAND_TIMEOUT_S，不會因此拖慢真正異常情況的回報。
+ADB_COLD_START_TIMEOUT_S: float = 12.0
+
 # adb server（adb 常駐背景 daemon，就是工作管理員裡那個 `adb.exe`）預設監聽
 # 的本機 TCP port。connect() 前用它探測「這次連線前 adb server 是不是已經
 # 在跑」，藉此判斷 disconnect() 收尾時能不能安全地 `adb kill-server`——只清

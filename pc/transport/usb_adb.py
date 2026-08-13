@@ -109,8 +109,16 @@ _adb_cli_lock = threading.Lock()
 # ------------------------------------------------------------------ #
 
 def _diag_list_adb_pids() -> list[int]:
-    """診斷用（todo011-1）：列出目前所有 adb.exe process 的 PID。用 Windows
-    內建 `tasklist`，不新增套件依賴（純診斷、只讀，不影響任何行為）。"""
+    """列出目前所有 adb.exe process 的 PID。用 Windows 內建 `tasklist`，不
+    新增套件依賴。只讀，本身不影響任何行為。
+
+    原本（todo011-1）只給 [diag_snapshot] 診斷用；todo011-5 起也被
+    [UsbAdbTransport.connect]／[UsbAdbTransport._kill_adb_server_if_owned]
+    拿來做真正的清理判斷依據（見該兩處說明）——起因是實測發現只靠
+    `adb kill-server` + [_is_adb_server_listening] 的 TCP port 探測判斷
+    「乾淨了」不可靠：一個 adb.exe process 可能還活著（甚至卡成 Windows
+    工作管理員裡的「已挂起」狀態），但沒有在監聽 port，這種情況會被誤判
+    成「已經沒有殘留」。"""
     try:
         result = subprocess.run(
             ["tasklist", "/FI", "IMAGENAME eq adb.exe", "/FO", "CSV", "/NH"],
@@ -131,6 +139,27 @@ def _diag_list_adb_pids() -> list[int]:
             except ValueError:
                 pass
     return pids
+
+
+def _force_kill_pid(pid: int) -> None:
+    """todo011-5：OS 層級強制終止一個 adb.exe process（見
+    [UsbAdbTransport._kill_adb_server_if_owned] 呼叫端的判斷邏輯）。用
+    Windows 內建 `taskkill /F /T`——`/T` 一併砍掉這個 PID 底下自己生出的
+    子行程（如果卡住的 adb.exe 自己又 fork 了下一層），只作用在這一個
+    PID 樹，不會動到其他無關的 adb.exe（例如使用者自己開著的 Android
+    Studio）。呼叫端已經先核對過這個 PID 是「這次 connect() 期間新冒出來
+    的」才會走到這裡，見呼叫端的基準比對邏輯。"""
+    try:
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=3.0,
+            creationflags=_SUBPROCESS_CREATIONFLAGS,
+        )
+        logger.info("[todo011-5] adb kill-server 後仍殘留，已用 taskkill 強制終止（PID %d）", pid)
+    except (subprocess.TimeoutExpired, OSError) as e:
+        logger.warning("[todo011-5] taskkill 強制終止 PID %d 失敗: %s", pid, e)
 
 
 def diag_snapshot(label: str) -> None:
@@ -293,6 +322,21 @@ class UsbAdbTransport(Transport):
         self._conn: Optional[socket.socket] = None
         self._send_lock = threading.Lock()
 
+        # todo011-5：StreamEngine.stop()（主執行緒）跟 StreamEngine._run()
+        # 自己的重連迴圈（stream-engine 背景執行緒）都可能呼叫
+        # transport.disconnect()（見 core/stream_engine.py），兩者同時發生
+        # 時，disconnect() 內部讀寫的 self._adb_path/_serial/
+        # _server_owned_by_us/_pids_before_connect 這幾個實例欄位會被
+        # 兩個執行緒交錯讀寫——實測過一次「先執行完的那個先把 _adb_path
+        # 清成 None，慢一步的那個讀到 None、以為沒有規則/server 需要清，
+        # 結果兩邊都沒真的呼叫到 `adb kill-server`」，adb.exe 因此殘留。
+        # `_adb_cli_lock`（模組層級）只序列化真正呼叫 adb 執行檔那一層，
+        # 保護不到這裡——這個鎖是實例層級，把整個 disconnect() 包起來，
+        # 確保兩個執行緒同時呼叫時，一個完整做完全套收尾，另一個等它做完
+        # 後才繼續（這時候要清的都已經被清掉、直接安全跳過），不會再有
+        # 「兩邊都讀到一半、誰都沒真的執行收尾」的情況。
+        self._disconnect_lock = threading.Lock()
+
         # adb reverse 規則的擁有者資訊，只有成功建立規則後才會有值；
         # disconnect() / connect() 失敗時的清理都靠這兩個欄位判斷「有沒有
         # 規則需要移除」，避免對一個從沒建立過的規則呼叫 `adb reverse
@@ -305,6 +349,11 @@ class UsbAdbTransport(Transport):
         # 只有 True 時，收尾才會呼叫 `adb kill-server`，避免誤殺使用者自己
         # 開著的 adb server（見本檔開頭說明）。
         self._server_owned_by_us: bool = False
+
+        # todo011-5：connect() 一開始記一次目前所有 adb.exe 的 PID 當基準，
+        # 供 [_kill_adb_server_if_owned] 收尾時核對「這次期間新冒出來、
+        # kill-server 之後是否真的消失」用，見該函式 docstring 的完整說明。
+        self._pids_before_connect: list[int] = []
 
     @property
     def display_name(self) -> str:
@@ -323,6 +372,10 @@ class UsbAdbTransport(Transport):
         # 開頭「todo011-1 診斷 log」說明。t0 只用於算耗時，不影響邏輯。
         t0 = time.monotonic()
         diag_snapshot("connect() 開始")
+
+        # todo011-5：記一次目前所有 adb.exe PID 當基準，供收尾核對用（見
+        # __init__ 欄位說明、[_kill_adb_server_if_owned] docstring）。
+        self._pids_before_connect = _diag_list_adb_pids()
 
         adb_path = _find_adb_executable()
         if adb_path is None:
@@ -345,9 +398,18 @@ class UsbAdbTransport(Transport):
             self._server_owned_by_us,
         )  # 診斷用（todo011-1）
 
+        # todo011-5：server 本來沒在跑時，這第一次呼叫要負責把它冷啟動起來，
+        # 比一般「server 早就在跑、只是問一句」慢很多（實測見 config.py
+        # ADB_COLD_START_TIMEOUT_S 說明），用放寬過的逾時，避免明明再等一下
+        # 就會成功卻被判定逾時失敗。
+        devices_timeout = (
+            config.ADB_COLD_START_TIMEOUT_S
+            if self._server_owned_by_us
+            else config.ADB_COMMAND_TIMEOUT_S
+        )
         t_devices0 = time.monotonic()  # 診斷用（todo011-1）
         try:
-            devices = _list_adb_devices(adb_path, config.ADB_COMMAND_TIMEOUT_S)
+            devices = _list_adb_devices(adb_path, devices_timeout)
         except TransportError:
             diag_snapshot(
                 f"connect()：`adb devices` 失敗（耗時 {(time.monotonic() - t_devices0) * 1000:.0f}ms）"
@@ -475,7 +537,11 @@ class UsbAdbTransport(Transport):
         # 主動中斷（沿用 wifi.py／usb_rndis.py §16-4 的教訓）：在拿
         # _send_lock 之前直接對 socket 呼叫完整的 close()，讓卡在阻塞式
         # sendall() 裡的 sender 執行緒立刻出錯返回；若先進鎖才 close()，
-        # 持鎖中的阻塞呼叫會讓這裡卡死等鎖。
+        # 持鎖中的阻塞呼叫會讓這裡卡死等鎖。這幾行刻意留在 `_disconnect_lock`
+        # 之外——就算另一個執行緒正持有那個鎖在慢慢做 adb 收尾，這裡的
+        # socket 中斷動作也要立刻生效，不能被卡住等鎖（`try_close()` 本身
+        # 對已關閉的 socket 是安全、可重複呼叫的，兩個執行緒各自呼叫互不
+        # 干擾）。
         conn = self._conn
         if conn is not None:
             try_close(conn)
@@ -483,18 +549,31 @@ class UsbAdbTransport(Transport):
         with self._send_lock:
             self._conn = None
 
-        # _adb_reverse_remove() 會把 self._adb_path 清成 None，所以要在呼叫
-        # 前先留一份給後面 kill-server 用（如果這次是我們啟動的 adb server）。
-        adb_path = self._adb_path
+        # todo011-5：以下這段才是「只能真正執行一次」的收尾（移除 adb
+        # reverse 規則、視情況 kill-server）——用實例層級的
+        # `_disconnect_lock` 包起來，確保 StreamEngine.stop()（主執行緒）
+        # 跟 StreamEngine._run() 自己的重連迴圈（背景執行緒）同時呼叫
+        # disconnect() 時，只有一個執行緒真的執行這段、讀寫
+        # self._adb_path 等欄位；另一個執行緒等它做完再進來時，該清的都
+        # 已經被清掉（_adb_path 已是 None、_server_owned_by_us 已是
+        # False），自然安全跳過，不會重複收尾，也不會再發生「兩邊都讀到
+        # 一半、誰都沒真的呼叫到 kill-server」的情況（見 __init__ 這個鎖
+        # 欄位的說明）。
+        with self._disconnect_lock:
+            # _adb_reverse_remove() 會把 self._adb_path 清成 None，所以要在
+            # 呼叫前先留一份給後面 kill-server 用（如果這次是我們啟動的
+            # adb server）。
+            adb_path = self._adb_path
 
-        # 連線已經建立過（或正要建立）的 adb reverse 規則，這裡才是真正
-        # 「這條連線结束了」的時間點，移除規則不留殘留。
-        self._adb_reverse_remove()
+            # 連線已經建立過（或正要建立）的 adb reverse 規則，這裡才是真正
+            # 「這條連線结束了」的時間點，移除規則不留殘留。
+            self._adb_reverse_remove()
 
-        # todo010-4：這條 U2 連線真正結束了，如果這次連線用到的 adb server
-        # 是我們自己啟動的，這裡負責關掉，不留孤兒 adb.exe 繼續對已斷線的
-        # 裝置跳「已停止響應」警告（見本檔開頭「adb server 生命週期」說明）。
-        self._kill_adb_server_if_owned(adb_path)
+            # todo010-4：這條 U2 連線真正結束了，如果這次連線用到的 adb
+            # server 是我們自己啟動的，這裡負責關掉，不留孤兒 adb.exe
+            # 繼續對已斷線的裝置跳「已停止響應」警告（見本檔開頭「adb
+            # server 生命週期」說明）。
+            self._kill_adb_server_if_owned(adb_path)
         diag_snapshot("disconnect() 結束")  # 診斷用（todo011-1）
 
     def send_frame(self, frame: Frame) -> None:
@@ -570,8 +649,22 @@ class UsbAdbTransport(Transport):
         connect() 失敗收尾都可能呼叫到這裡，重置後才不會同一次探測結果被
         重複消費、對一個早就關掉的 server 再呼叫一次 kill-server（雖然無害，
         但沒必要）。
+
+        todo011-5：實測發現只靠 `adb kill-server` 執行完 + `_is_adb_server_
+        listening()` 探測不到人監聽，不能保證真的乾淨——adb client 沒有
+        server 可用時會另外 fork 一個獨立的 server 行程、自己等它就緒，如果
+        我們呼叫 `adb devices` 逾時、Python 把當下那個 client 行程砍掉，
+        它已經 fork 出去的 server 行程不會受影響，可能卡在等 client 回應
+        的狀態變成孤兒（見 config.py ADB_COLD_START_TIMEOUT_S 的實測說明），
+        `adb kill-server` 只找「目前真的在監聽 port 的那個」，不保證連得到
+        這種卡住、根本沒有正常監聽的殘留 process。所以這裡在 `adb
+        kill-server` 之後，額外核對「這次 connect() 期間新冒出來
+        （不在 self._pids_before_connect 基準清單裡）、現在仍然還在」的
+        adb.exe，用 [_force_kill_pid] 在 OS 層級強制終止——只動「新冒出來
+        的」，不會誤殺使用者自己原本就開著的 adb server。
         """
         owned, self._server_owned_by_us = self._server_owned_by_us, False
+        baseline_pids, self._pids_before_connect = self._pids_before_connect, []
         if not owned or adb_path is None:
             return
         t0 = time.monotonic()  # 診斷用（todo011-1）
@@ -587,3 +680,9 @@ class UsbAdbTransport(Transport):
         diag_snapshot(
             f"_kill_adb_server_if_owned()：kill-server 呼叫耗時 {(time.monotonic() - t0) * 1000:.0f}ms"
         )
+        # todo011-5：核對殘留，逃過 kill-server 的一律強制終止。
+        leftover = [pid for pid in _diag_list_adb_pids() if pid not in baseline_pids]
+        for pid in leftover:
+            _force_kill_pid(pid)
+        if leftover:
+            diag_snapshot("_kill_adb_server_if_owned()：強制終止殘留 process 後")
