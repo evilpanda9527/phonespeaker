@@ -65,3 +65,12 @@ installer/resources/adb/*.dll
 # PC/Android packaged output (e.g. top-level dist/ for release artefacts) is
 # already covered by the `dist/` rule above — attach builds to GitHub
 # Releases instead of committing them.
+
+# todo012: personal dev-session transcript with a real local Windows
+# username/folder path baked in — keep it locally as a dev-notes artefact,
+# never publish it (this repo is going public).
+docs/dev-notes/note.txt
+
+# Stray runtime log dropped at repo root during manual debugging sessions
+# (already covered by the `*.log` rule above, listed here just for clarity).
+/*.log
