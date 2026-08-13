@@ -57,6 +57,7 @@ import shutil
 import socket
 import subprocess
 import threading
+import time
 from typing import Optional
 
 import config
@@ -76,6 +77,58 @@ _ACCEPT_POLL_INTERVAL_S = 0.5
 # Windows 上用 pythonw 執行 GUI 時，subprocess 預設仍可能彈出一個黑色主控台
 # 視窗；加這個旗標避免使用者看到跟本次操作無關的視窗閃現。
 _SUBPROCESS_CREATIONFLAGS = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+
+
+# ------------------------------------------------------------------ #
+# todo011-1 診斷 log（只加 log，不改行為/邏輯；比照 gui.py todo07-1 的
+# 「[停止診斷]」慣例）。要抓的 bug：第一次啟動 app 時 WiFi/U1/U2 都正常，
+# 關閉 app（adb.exe 有跟著正確關掉），但第二次啟動 U2 連不上——會看到一個
+# 新啟動的 adb.exe，但它最終自己關閉。目前的猜測（尚未證實，不能直接動
+# 邏輯去猜著修）：U2 前置偵測輪詢執行緒（gui.py _adb_poll_loop，呼叫
+# probe_state()）跟 connect() 各自呼叫 adb 指令的時機可能重疊——如果兩者
+# 幾乎同時發現 adb server 還沒在跑，各自觸發的 adb 都可能嘗試啟動 server，
+# 兩個互搶同一個 port，其中一個因此自己結束。這裡加的 log 就是要用真實
+# PID／時間戳記證實或推翻這個猜測，不代表最終根因就是這個。
+# ------------------------------------------------------------------ #
+
+def _diag_list_adb_pids() -> list[int]:
+    """診斷用（todo011-1）：列出目前所有 adb.exe process 的 PID。用 Windows
+    內建 `tasklist`，不新增套件依賴（純診斷、只讀，不影響任何行為）。"""
+    try:
+        result = subprocess.run(
+            ["tasklist", "/FI", "IMAGENAME eq adb.exe", "/FO", "CSV", "/NH"],
+            capture_output=True,
+            text=True,
+            timeout=3.0,
+            creationflags=_SUBPROCESS_CREATIONFLAGS,
+        )
+    except (subprocess.TimeoutExpired, OSError) as e:
+        logger.debug("[診斷] tasklist 查詢 adb.exe PID 失敗（可忽略）: %s", e)
+        return []
+    pids: list[int] = []
+    for line in result.stdout.splitlines():
+        parts = [p.strip('"') for p in line.split('","')]
+        if len(parts) >= 2 and parts[0].lower() == "adb.exe":
+            try:
+                pids.append(int(parts[1]))
+            except ValueError:
+                pass
+    return pids
+
+
+def diag_snapshot(label: str) -> None:
+    """診斷用（todo011-1）：記一次「adb server 是否在監聽 + 目前所有
+    adb.exe PID」快照，附呼叫端的執行緒名稱（輪詢執行緒 vs. StreamEngine
+    的連線執行緒 vs. 主執行緒，同一份 log 檔案裡交錯出現，靠這個欄位分辨
+    誰在哪個時間點做了什麼）。呼叫端（main.py／gui.py／本檔）在關鍵時間點
+    各呼叫一次，`label` 是自由文字，方便在 log 裡搜尋比對。只讀（一次短
+    逾時 TCP 探測＋一次 tasklist 查詢），不影響任何行為。"""
+    listening = _is_adb_server_listening()
+    pids = _diag_list_adb_pids()
+    logger.info(
+        "[診斷][%s] %s：adb server 監聽中=%s，目前 adb.exe PID=%s",
+        threading.current_thread().name, label, listening, pids,
+    )
 
 
 @dataclasses.dataclass
@@ -132,14 +185,26 @@ def probe_state(timeout: float = None) -> AdbState:
     不會重現那個孤兒規則的情境，不需要特別收尾。"""
     if timeout is None:
         timeout = config.ADB_COMMAND_TIMEOUT_S
+    t0 = time.monotonic()  # 診斷用（todo011-1）
+    diag_snapshot("probe_state() 開始（U2 前置偵測輪詢）")
     adb_path = _find_adb_executable()
     if adb_path is None:
+        # 診斷用（todo011-1）
+        diag_snapshot(f"probe_state() 結束（耗時 {(time.monotonic() - t0) * 1000:.0f}ms，找不到 adb 執行檔）")
         return AdbState.NOT_FOUND
     try:
         devices = _list_adb_devices(adb_path, timeout)
     except TransportError as e:
         logger.debug("probe_state(): %s（歸類為 not_found）", e)
+        # 診斷用（todo011-1）
+        diag_snapshot(
+            f"probe_state() 結束（耗時 {(time.monotonic() - t0) * 1000:.0f}ms，`adb devices` 失敗）"
+        )
         return AdbState.NOT_FOUND
+    # 診斷用（todo011-1）
+    diag_snapshot(
+        f"probe_state() 結束（耗時 {(time.monotonic() - t0) * 1000:.0f}ms，取得 {len(devices)} 台裝置）"
+    )
     return _classify_devices(devices)
 
 
@@ -301,6 +366,11 @@ class UsbAdbTransport(Transport):
         if self._conn is not None:
             raise TransportError("已經有連線中的 client，請先 disconnect()")
 
+        # 診斷用（todo011-1）：抓「第二次啟動 U2 連不上」這個 bug，見本檔
+        # 開頭「todo011-1 診斷 log」說明。t0 只用於算耗時，不影響邏輯。
+        t0 = time.monotonic()
+        diag_snapshot("connect() 開始")
+
         adb_path = _find_adb_executable()
         if adb_path is None:
             raise AdbNotFoundError(
@@ -313,13 +383,28 @@ class UsbAdbTransport(Transport):
         # 任何一個 adb 指令（`adb devices`／`adb reverse`）若真的觸發 adb
         # 自動啟動 server，那個 server 就是「我們啟動的」，收尾時要負責關掉
         # （見本檔開頭「adb server 生命週期」說明）。
+        t_probe0 = time.monotonic()  # 診斷用（todo011-1）
         self._server_owned_by_us = not _is_adb_server_listening()
+        logger.info(
+            "[診斷][%s] connect()：啟動探測耗時 %.0fms，判定 _server_owned_by_us=%s",
+            threading.current_thread().name,
+            (time.monotonic() - t_probe0) * 1000,
+            self._server_owned_by_us,
+        )  # 診斷用（todo011-1）
 
+        t_devices0 = time.monotonic()  # 診斷用（todo011-1）
         try:
             devices = _list_adb_devices(adb_path, config.ADB_COMMAND_TIMEOUT_S)
         except TransportError:
+            diag_snapshot(
+                f"connect()：`adb devices` 失敗（耗時 {(time.monotonic() - t_devices0) * 1000:.0f}ms）"
+            )  # 診斷用（todo011-1）
             self._kill_adb_server_if_owned(adb_path)
             raise
+        diag_snapshot(
+            f"connect()：`adb devices` 完成（耗時 {(time.monotonic() - t_devices0) * 1000:.0f}ms，"
+            f"取得 {len(devices)} 台裝置）"
+        )  # 診斷用（todo011-1）
 
         usable = [d for d in devices if d.state == "device"]
         if not usable:
@@ -359,20 +444,38 @@ class UsbAdbTransport(Transport):
 
         # 先確保 PC 端已經在聽，再建立 adb reverse 規則，避免手機那邊剛好
         # 在這個時間點連過來卻撲空。
+        t_reverse0 = time.monotonic()  # 診斷用（todo011-1）
         try:
             self._adb_reverse(adb_path, serial)
         except TransportError:
+            diag_snapshot(
+                f"connect()：`adb reverse` 失敗（耗時 {(time.monotonic() - t_reverse0) * 1000:.0f}ms）"
+            )  # 診斷用（todo011-1）
             try_close(listen_sock)
             self._listen_sock = None
             self._kill_adb_server_if_owned(adb_path)
             raise
+        diag_snapshot(
+            f"connect()：`adb reverse` 完成（耗時 {(time.monotonic() - t_reverse0) * 1000:.0f}ms），"
+            "開始等待手機端連線"
+        )  # 診斷用（todo011-1）
 
         accepted = False
+        accept_wait_iterations = 0  # 診斷用（todo011-1）：每隔數次迴圈記一次快照
         try:
             while self._listen_sock is not None:
                 try:
                     conn, addr = listen_sock.accept()
                 except socket.timeout:
+                    # 診斷用（todo011-1）：等待手機連線期間，adb.exe 若真的
+                    # 「自己關閉」，這裡每隔約 5 秒（_ACCEPT_POLL_INTERVAL_S
+                    # 的 10 倍）記一次快照，藉此抓到消失的時間點。純加 log，
+                    # 不改變原本 continue 的行為。
+                    accept_wait_iterations += 1
+                    if accept_wait_iterations % 10 == 0:
+                        diag_snapshot(
+                            f"connect()：等待手機端連線中（第 {accept_wait_iterations} 次逾時）"
+                        )
                     continue
                 except OSError as e:
                     raise TransportCancelled("connect() 被取消") from e
@@ -380,6 +483,8 @@ class UsbAdbTransport(Transport):
                 self._conn = conn
                 accepted = True
                 logger.info("USB (adb) client 已連線: %s（裝置序號 %s）", addr, serial)
+                # 診斷用（todo011-1）
+                diag_snapshot(f"connect()：成功（總耗時 {(time.monotonic() - t0) * 1000:.0f}ms）")
                 return
             raise TransportCancelled("connect() 被取消")
         finally:
@@ -387,6 +492,11 @@ class UsbAdbTransport(Transport):
                 try_close(self._listen_sock)
                 self._listen_sock = None
             if not accepted:
+                # 診斷用（todo011-1）
+                diag_snapshot(
+                    f"connect()：未成功結束（總耗時 {(time.monotonic() - t0) * 1000:.0f}ms），"
+                    "開始清理 adb reverse / adb server"
+                )
                 # 還沒真的建立連線就結束（取消/逾時等）：adb reverse 規則
                 # 沒有用武之地了，清掉它，不留下沒人用的轉發規則；如果這次
                 # 連線用到的 adb server 是我們啟動的，也一併關掉，不留孤兒
@@ -400,6 +510,13 @@ class UsbAdbTransport(Transport):
         try_close(sock)
 
     def disconnect(self) -> None:
+        # 診斷用（todo011-1）：記下呼叫當下 _server_owned_by_us 的值——
+        # _kill_adb_server_if_owned() 執行完會把它重置成 False，這裡要在
+        # 重置前先記錄，才看得出「這次 disconnect() 到底判斷這個 server
+        # 是不是我們啟動的」。
+        diag_snapshot(
+            f"disconnect() 開始（_server_owned_by_us={self._server_owned_by_us}）"
+        )
         self.request_cancel()
 
         # 主動中斷（沿用 wifi.py／usb_rndis.py §16-4 的教訓）：在拿
@@ -425,6 +542,7 @@ class UsbAdbTransport(Transport):
         # 是我們自己啟動的，這裡負責關掉，不留孤兒 adb.exe 繼續對已斷線的
         # 裝置跳「已停止響應」警告（見本檔開頭「adb server 生命週期」說明）。
         self._kill_adb_server_if_owned(adb_path)
+        diag_snapshot("disconnect() 結束")  # 診斷用（todo011-1）
 
     def send_frame(self, frame: Frame) -> None:
         conn = self._conn
@@ -503,6 +621,7 @@ class UsbAdbTransport(Transport):
         owned, self._server_owned_by_us = self._server_owned_by_us, False
         if not owned or adb_path is None:
             return
+        t0 = time.monotonic()  # 診斷用（todo011-1）
         try:
             _run_adb(adb_path, ["kill-server"], config.ADB_COMMAND_TIMEOUT_S)
             logger.info("adb server 已結束（本程式為 U2 啟動的，非使用者既有的 adb server）")
@@ -510,3 +629,8 @@ class UsbAdbTransport(Transport):
             # 跟 _adb_reverse_remove() 同樣的考量：不該讓 disconnect() 拋例外，
             # 安全忽略即可（常見成因：裝置已拔線、adb 早已找不到它）。
             logger.debug("結束 adb server 時發生非致命錯誤（可忽略）: %s", e)
+        # 診斷用（todo011-1）：確認 kill-server 呼叫完之後 process 是不是
+        # 真的消失了（而不是只有這次呼叫「看起來」成功）。
+        diag_snapshot(
+            f"_kill_adb_server_if_owned()：kill-server 呼叫耗時 {(time.monotonic() - t0) * 1000:.0f}ms"
+        )

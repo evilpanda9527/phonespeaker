@@ -28,6 +28,7 @@ from transport.base import Transport
 from transport.usb_adb import (
     AdbState,
     UsbAdbTransport,
+    diag_snapshot as _adb_diag_snapshot,  # 診斷用（todo011-1）
     is_adb_server_listening as _adb_server_listening,
     kill_orphaned_probe_server as _kill_orphaned_adb_probe_server,
     probe_state as probe_adb_state,
@@ -275,6 +276,8 @@ class App(ctk.CTk):
         # 同一個探測的用法（見 usb_adb.py「adb server 生命週期」說明）。
         if not self._adb_poll_owns_server and not _adb_server_listening():
             self._adb_poll_owns_server = True
+        # 診斷用（todo011-1）
+        _adb_diag_snapshot(f"_start_adb_poll()：_adb_poll_owns_server={self._adb_poll_owns_server}")
         self._adb_poll_stop.clear()
         thread = threading.Thread(target=self._adb_poll_loop, name="adb-status-poll", daemon=True)
         self._adb_poll_thread = thread
@@ -356,6 +359,20 @@ class App(ctk.CTk):
         # todo011 §2：真的要連線了，U2 主動偵測輪詢沒有必要繼續跑（避免跟
         # transport.connect() 自己的 `adb devices` 同時搶著跑，也沒有 UI
         # 意義——選單本身接下來就會被 disable，使用者看不到也改不了選擇）。
+        #
+        # 診斷用（todo011-1）：_stop_adb_poll() 只設旗標、不 join()（見該
+        # 函式註解），所以這裡「呼叫完就返回」不代表輪詢執行緒真的已經停下
+        # 來——如果它當下正卡在一次 probe_adb_state()／`adb devices` 呼叫
+        # 中，接下來 transport.connect() 幾乎同時也會呼叫 adb 指令，兩者就
+        # 可能重疊。這裡記一次「呼叫 _stop_adb_poll() 前，輪詢執行緒是否還
+        # 活著」，藉此驗證/推翻這個猜測（見本檔 usb_adb.py 開頭的診斷說明）。
+        poll_thread_alive_before_stop = (
+            self._adb_poll_thread is not None and self._adb_poll_thread.is_alive()
+        )
+        logger.info(
+            "[診斷] _start_engine()：呼叫 _stop_adb_poll() 前，輪詢執行緒存活=%s",
+            poll_thread_alive_before_stop,
+        )
         self._stop_adb_poll()
 
         transport_id = self._selected_transport_id
@@ -454,6 +471,11 @@ class App(ctk.CTk):
         )
 
     def _on_close(self) -> None:
+        # 診斷用（todo011-1）：關閉流程最開頭先記一次快照＋當下的
+        # _adb_poll_owns_server 旗標值，抓「第二次啟動 U2 連不上」這個 bug。
+        _adb_diag_snapshot(
+            f"_on_close() 開始（_adb_poll_owns_server={self._adb_poll_owns_server}）"
+        )
         if self._running:
             self._stop_engine()
         # todo011 §2：關閉前把主動偵測輪詢的旗標設起來。跟 _stop_adb_poll()
@@ -470,6 +492,7 @@ class App(ctk.CTk):
         if self._adb_poll_owns_server:
             _kill_orphaned_adb_probe_server()
             self._adb_poll_owns_server = False
+        _adb_diag_snapshot("_on_close()：adb 收尾完成，即將 destroy()/os._exit()")  # 診斷用（todo011-1）
         self.destroy()
         # 已知問題（見 PoC 報告）：PyAudioWPatch 在這個環境下，即使整段錄音
         # 流程完全正常，Python 直譯器正常收尾（GC/atexit）時仍可能在原生

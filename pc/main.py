@@ -63,6 +63,18 @@ def main() -> int:
     logger = logging.getLogger(__name__)
     logger.info("PhoneSpeaker PC 啟動（M1-A WiFi PoC）")
 
+    # 診斷用（todo011-1）：app 啟動當下先記一次 adb server 監聽狀態＋目前
+    # 所有 adb.exe PID 的快照，抓「第二次啟動 U2 連不上」這個 bug（見
+    # transport/usb_adb.py 開頭「todo011-1 診斷 log」說明）。usb_adb.py
+    # 只依賴標準函式庫＋本專案的 config/paths/core 模組，不需要
+    # customtkinter 等第三方套件，放在下面 `import gui` 的套件檢查之前
+    # 不會影響「缺少必要套件」那個錯誤路徑。
+    try:
+        from transport.usb_adb import diag_snapshot as _adb_diag_snapshot
+        _adb_diag_snapshot("app 啟動")
+    except Exception as e:  # noqa: BLE001 — 診斷 log 本身不該讓 app 啟動失敗
+        logger.warning("[診斷] app 啟動快照失敗（可忽略，不影響啟動）: %s", e)
+
     try:
         import gui
     except ImportError as e:
