@@ -25,14 +25,7 @@ import config
 import i18n
 from core.stream_engine import EngineCallbacks, EngineState, StreamEngine
 from transport.base import Transport
-from transport.usb_adb import (
-    AdbState,
-    UsbAdbTransport,
-    diag_snapshot as _adb_diag_snapshot,  # 診斷用（todo011-1）
-    is_adb_server_listening as _adb_server_listening,
-    kill_orphaned_probe_server as _kill_orphaned_adb_probe_server,
-    probe_state as probe_adb_state,
-)
+from transport.usb_adb import UsbAdbTransport
 from transport.usb_rndis import UsbRndisTransport
 from transport.wifi import WifiTransport
 
@@ -49,13 +42,6 @@ TRANSPORT_FACTORIES: dict[str, Callable[[], Transport]] = {
     "usb_rndis": lambda: UsbRndisTransport(),
     "usb_adb": lambda: UsbAdbTransport(),
 }
-
-# todo011 §2：U2 前置狀態主動偵測的輪詢間隔。只在「選到 USB(adb) 且目前
-# 閒置(未啟動)」時才會跑（見 _start_adb_poll / _on_transport_selected），
-# 2 秒夠即時反映使用者剛在手機上開偵錯/按允許的動作，又不會頻繁到造成
-# 明顯負擔（每次輪詢就是一次 `adb devices`，跟使用者自己在命令列打是
-# 同一件事）。
-_ADB_POLL_INTERVAL_S = 2.0
 
 _STATE_KEYS = {
     EngineState.IDLE: "state.idle",
@@ -86,22 +72,6 @@ class App(ctk.CTk):
         self._selected_transport_id: str = TRANSPORT_IDS[0]
         self._current_state: EngineState = EngineState.IDLE
         self._current_format_text: Optional[str] = None  # None＝顯示 placeholder
-
-        # todo011 §2：U2(USB adb) 前置狀態主動偵測——None＝還沒偵測出結果
-        # （沿用舊的靜態提示當 placeholder），偵測到結果後改顯示對應狀態
-        # （見 _refresh_transport_hint / _adb_poll_loop）。
-        self._adb_probe_state: Optional[AdbState] = None
-        self._adb_poll_stop = threading.Event()
-        self._adb_poll_thread: Optional[threading.Thread] = None
-
-        # bug fix（使用者實測回報）：U2 前置偵測輪詢若在 adb server 還沒
-        # 啟動時跑起來，會順帶把它啟動、卻從沒人收尾（[probe_state] 故意
-        # 不管 server 生命週期，見該函式 docstring）。這裡記「輪詢啟動當下
-        # server 是不是已經在跑」，True 才代表這次 app 執行期間可能是我們
-        # 自己讓它啟動的，_on_close() 才需要負責關掉，不誤殺使用者自己另外
-        # 開著的 adb server（例如 Android Studio）。一旦記到 True 就維持
-        # 到 app 關閉，不會被之後幾次「已經在跑」的輪詢重置回 False。
-        self._adb_poll_owns_server: bool = False
 
         self._build_ui()
         self._apply_language()
@@ -245,68 +215,20 @@ class App(ctk.CTk):
         self.log_caption.configure(text=i18n.t("label.log"))
 
     def _refresh_transport_hint(self) -> None:
-        """todo011 §2：U2(USB adb) 選到時顯示主動偵測到的即時狀態（見
-        [_adb_hint_text]）；其餘 transport（或 U2 還沒偵測出結果時）維持
-        原本 todo08-1 的靜態引導提示，行為不變。"""
-        if self._selected_transport_id == "usb_adb" and self._adb_probe_state is not None:
-            self.transport_hint_label.configure(text=self._adb_hint_text(self._adb_probe_state))
-        else:
-            self.transport_hint_label.configure(
-                text=i18n.t(f"transport.{self._selected_transport_id}.hint")
-            )
+        """todo08-1：選到需要手機端先開開關/同一網路的 transport 時，顯示
+        對應的靜態引導提示。
 
-    @staticmethod
-    def _adb_hint_text(state: AdbState) -> str:
-        if state is AdbState.READY:
-            return ""  # 情況 3：就緒，不顯示警告（todo011 §2 一）
-        if state is AdbState.UNAUTHORIZED:
-            return i18n.t("adb_status.unauthorized")
-        return i18n.t("adb_status.not_found")
-
-    def _start_adb_poll(self) -> None:
-        """todo011 §2：只在「選到 USB(adb) 且目前閒置」時才跑的背景偵測
-        輪詢（見 _on_transport_selected / _start_engine / _stop_engine 呼叫
-        時機）。用背景執行緒＋既有的 _threadsafe/callback_queue 機制回主
-        執行緒更新 UI，不直接在輪詢執行緒呼叫任何 Tk 方法（§16-4 教訓：
-        跨執行緒直接呼叫 Tk 方法會互相卡住，這裡完全比照既有作法）。"""
-        if self._adb_poll_thread is not None:
-            return
-        # bug fix：只在還沒判定過「是我們啟動的」之前才需要探測——探測本身
-        # 是一次同步的短逾時 TCP connect，不會啟動 adb，比照 connect() 裡
-        # 同一個探測的用法（見 usb_adb.py「adb server 生命週期」說明）。
-        if not self._adb_poll_owns_server and not _adb_server_listening():
-            self._adb_poll_owns_server = True
-        # 診斷用（todo011-1）
-        _adb_diag_snapshot(f"_start_adb_poll()：_adb_poll_owns_server={self._adb_poll_owns_server}")
-        self._adb_poll_stop.clear()
-        thread = threading.Thread(target=self._adb_poll_loop, name="adb-status-poll", daemon=True)
-        self._adb_poll_thread = thread
-        thread.start()
-
-    def _stop_adb_poll(self) -> None:
-        # 只設旗標、不 join()：輪詢執行緒可能正卡在一次 `adb devices`
-        # 呼叫中（最長 config.ADB_COMMAND_TIMEOUT_S），比照 §16-4 教訓，
-        # 呼叫端（主執行緒）絕不能等它——旗標設完就返回，執行緒會在下一次
-        # 迴圈檢查點自然結束（daemon=True，就算真的卡住也不會擋 app 關閉）。
-        self._adb_poll_stop.set()
-        self._adb_poll_thread = None
-        self._adb_probe_state = None
-
-    def _adb_poll_loop(self) -> None:
-        on_result = self._threadsafe(self._on_adb_state_probed)
-        while not self._adb_poll_stop.is_set():
-            try:
-                state = probe_adb_state()
-            except Exception as e:  # noqa: BLE001 — 偵測執行緒本身的例外不該拖垮整個 GUI
-                logger.warning("U2 主動偵測 adb 狀態時發生非預期例外: %s", e)
-                state = None
-            if state is not None and not self._adb_poll_stop.is_set():
-                on_result(state)
-            self._adb_poll_stop.wait(_ADB_POLL_INTERVAL_S)
-
-    def _on_adb_state_probed(self, state: AdbState) -> None:
-        self._adb_probe_state = state
-        self._refresh_transport_hint()
+        todo011-4：U2(USB adb) 原本在這裡疊加一層背景輪詢即時偵測結果
+        （todo011 §2），已整個移除——U2 現在跟 WiFi/U1 一樣，standby 狀態
+        不主動做任何背景 adb 呼叫，「找不到裝置／unauthorized／正常連線」
+        這三種狀態的判斷全部挪到使用者按下 START 那一刻，由 connect() 一次
+        性完成並透過既有的 on_error callback 回報（見 transport/usb_adb.py
+        `_MSG_NOT_FOUND`／`_MSG_UNAUTHORIZED`），不再需要獨立的即時提示。
+        根因見 todo011-1～-4 這幾輪診斷：背景輪詢執行緒跟 connect() 各自
+        呼叫 adb 的時機重疊，會讓 adb 的 client-server 協定被打斷。"""
+        self.transport_hint_label.configure(
+            text=i18n.t(f"transport.{self._selected_transport_id}.hint")
+        )
 
     def _refresh_usb_fallback_label(self) -> None:
         # `detected_ip` 只有 UsbRndisTransport 才有；WiFi 模式下這裡永遠是
@@ -322,17 +244,9 @@ class App(ctk.CTk):
 
     def _on_transport_selected(self, choice: str) -> None:
         """下拉選單 command callback：純 UI 提示更新，不動連線邏輯（todo08-1）。
-
-        todo011 §2：切到 USB(adb) 且目前閒置時啟動主動偵測輪詢；切離開時
-        停止（沒必要在使用者根本沒選 U2 時一直背景執行 `adb devices`）。
+        todo011-4：U2 不再有背景輪詢需要啟動/停止，這裡跟 WiFi/U1 完全一致。
         """
         self._selected_transport_id = self._transport_label_to_id.get(choice, self._selected_transport_id)
-        if self._selected_transport_id == "usb_adb":
-            self._adb_probe_state = None
-            if not self._running:
-                self._start_adb_poll()
-        else:
-            self._stop_adb_poll()
         self._refresh_transport_hint()
 
     def _on_language_selected(self, choice: str) -> None:
@@ -355,25 +269,6 @@ class App(ctk.CTk):
         # 沒有真正結束的殭屍執行緒（例如仍看到多個同名 "audio-capture"、
         # "device-monitor"、"pcm-sender"、"stream-engine"）。
         self._log_alive_threads("_start_engine() 啟動前")
-
-        # todo011 §2：真的要連線了，U2 主動偵測輪詢沒有必要繼續跑（避免跟
-        # transport.connect() 自己的 `adb devices` 同時搶著跑，也沒有 UI
-        # 意義——選單本身接下來就會被 disable，使用者看不到也改不了選擇）。
-        #
-        # 診斷用（todo011-1）：_stop_adb_poll() 只設旗標、不 join()（見該
-        # 函式註解），所以這裡「呼叫完就返回」不代表輪詢執行緒真的已經停下
-        # 來——如果它當下正卡在一次 probe_adb_state()／`adb devices` 呼叫
-        # 中，接下來 transport.connect() 幾乎同時也會呼叫 adb 指令，兩者就
-        # 可能重疊。這裡記一次「呼叫 _stop_adb_poll() 前，輪詢執行緒是否還
-        # 活著」，藉此驗證/推翻這個猜測（見本檔 usb_adb.py 開頭的診斷說明）。
-        poll_thread_alive_before_stop = (
-            self._adb_poll_thread is not None and self._adb_poll_thread.is_alive()
-        )
-        logger.info(
-            "[診斷] _start_engine()：呼叫 _stop_adb_poll() 前，輪詢執行緒存活=%s",
-            poll_thread_alive_before_stop,
-        )
-        self._stop_adb_poll()
 
         transport_id = self._selected_transport_id
         factory = TRANSPORT_FACTORIES[transport_id]
@@ -424,12 +319,6 @@ class App(ctk.CTk):
         self.usb_fallback_label.configure(text="")
         self._append_log(i18n.t("log.stopped"))
         self._log_alive_threads("_stop_engine() 結束後")
-
-        # todo011 §2：回到閒置了，如果使用者選的還是 USB(adb)，重新開始
-        # 主動偵測輪詢（跟 _on_transport_selected 選到 U2 時的邏輯一致）。
-        if self._selected_transport_id == "usb_adb":
-            self._adb_probe_state = None
-            self._start_adb_poll()
         self._refresh_transport_hint()
 
     def _on_state_changed(self, state: EngineState) -> None:
@@ -443,15 +332,6 @@ class App(ctk.CTk):
             self._running = False
             self.start_stop_btn.configure(text=i18n.t("btn.start"))
             self.transport_menu.configure(state="normal")
-            # todo011 §2：這裡是唯一保證「回到閒置」都會經過的地方——包含
-            # 使用者按停止（_stop_engine() 也會另外立刻恢復一次，見該處
-            # 註解）、以及 connect() 一啟動就失敗（例如 U2 未授權）這種
-            # engine 自己結束、使用者根本沒按過停止的情況。兩種情況都要讓
-            # 主動偵測輪詢恢復，不能只靠 _stop_engine() 那一份。
-            if self._selected_transport_id == "usb_adb":
-                self._adb_probe_state = None
-                self._start_adb_poll()
-                self._refresh_transport_hint()
 
     def _log_alive_threads(self, label: str) -> None:
         """診斷用（見 todo07-1）：印出目前所有非 main 的背景執行緒名稱。
@@ -471,28 +351,15 @@ class App(ctk.CTk):
         )
 
     def _on_close(self) -> None:
-        # 診斷用（todo011-1）：關閉流程最開頭先記一次快照＋當下的
-        # _adb_poll_owns_server 旗標值，抓「第二次啟動 U2 連不上」這個 bug。
-        _adb_diag_snapshot(
-            f"_on_close() 開始（_adb_poll_owns_server={self._adb_poll_owns_server}）"
-        )
+        # todo011-4：U2 不再有背景輪詢，所以也不再需要「輪詢有沒有順帶啟動
+        # adb server、關閉時要不要收尾」這一段（原本的 _adb_poll_owns_server／
+        # kill_orphaned_probe_server()，todo011-1 加的）——U2 連線期間如果
+        # 真的由本程式啟動了 adb server，走的是 todo010-4 那條既有路徑：
+        # _stop_engine() → engine.stop() → transport.disconnect() →
+        # UsbAdbTransport._kill_adb_server_if_owned()，跟這裡完全無關、
+        # 不受影響。
         if self._running:
             self._stop_engine()
-        # todo011 §2：關閉前把主動偵測輪詢的旗標設起來。跟 _stop_adb_poll()
-        # 一貫的原則一樣不 join()——反正接下來就是 os._exit(0)，daemon
-        # 執行緒本來就會跟著 process 一起結束，這裡純粹是不留著旗標沒設的
-        # 習慣性收尾，不是必要條件。
-        self._stop_adb_poll()
-        # bug fix（使用者實測回報：關閉 app 後 adb.exe 還留著）：只有這次
-        # app 執行期間，U2 前置偵測輪詢真的把原本沒在跑的 adb server 啟動
-        # 起來時（見 _start_adb_poll 設 _adb_poll_owns_server 的地方）才
-        # 呼叫這裡收尾；使用者自己另外開著的 adb server 不會被動到。這裡
-        # 是同步呼叫（最長 config.ADB_COMMAND_TIMEOUT_S），在 os._exit()
-        # 之前執行完，不影響下面既有的 destroy()/os._exit() 收尾流程。
-        if self._adb_poll_owns_server:
-            _kill_orphaned_adb_probe_server()
-            self._adb_poll_owns_server = False
-        _adb_diag_snapshot("_on_close()：adb 收尾完成，即將 destroy()/os._exit()")  # 診斷用（todo011-1）
         self.destroy()
         # 已知問題（見 PoC 報告）：PyAudioWPatch 在這個環境下，即使整段錄音
         # 流程完全正常，Python 直譯器正常收尾（GC/atexit）時仍可能在原生

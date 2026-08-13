@@ -38,7 +38,25 @@ REM but nothing ever stopped it on app close (see
 REM transport/usb_adb.py: kill_orphaned_probe_server / probe_state).
 REM Fixed in gui.py + transport/usb_adb.py only; no other transport/
 REM protocol code touched. PATCH bump.
-set VERSION=1.1.2
+REM
+REM todo011-1/-2/-3/-4: diagnostic logging (todo011-1) found the real root
+REM cause -- the U2 background poll thread and connect()/disconnect() both
+REM independently invoked the `adb` CLI with no synchronization; when their
+REM timing overlapped, concurrent adb client subprocesses corrupted the adb
+REM client-server protocol handshake (confirmed in real logs: "protocol
+REM fault (couldn't read status): connection reset", cascading 5s timeouts,
+REM and a transient duplicate adb.exe process). Fix (todo011-4, at the
+REM user's direction): removed the background poll entirely -- U2 now
+REM matches WiFi/U1 ("standby does nothing in the background; all state
+REM detection happens once, at the moment the user presses START, inside
+REM connect()"). Added a module-level lock around all `adb` CLI invocations
+REM in transport/usb_adb.py as a safety net (also covers disconnect() being
+REM entered from two threads, an existing StreamEngine reconnect-loop
+REM scenario). Removed the now-dead poll-only helpers and i18n keys.
+REM Changed gui.py, transport/usb_adb.py, i18n.py only. UX tradeoff: no more
+REM live "not authorized" hint while idle; connect() itself now takes
+REM ~1-3s longer to report failure/success on first press. PATCH bump.
+set VERSION=1.1.3
 set ZIPNAME=PhoneSpeaker-PC-portable-v%VERSION%.zip
 
 if not exist .venv\Scripts\python.exe (

@@ -78,6 +78,23 @@ _ACCEPT_POLL_INTERVAL_S = 0.5
 # 視窗；加這個旗標避免使用者看到跟本次操作無關的視窗閃現。
 _SUBPROCESS_CREATIONFLAGS = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 
+# todo011-4：安全網——序列化所有真正呼叫 `adb` 執行檔的地方（見 [_run_adb]）。
+# 根因（todo011-1/-2/-3 診斷 log 證實，見該幾輪 commit）：舊版 U2 前置狀態
+# 背景輪詢執行緒跟 connect()/disconnect() 各自獨立呼叫 `adb devices`／
+# `adb reverse`／`kill-server`，時機重疊時，多個 adb client 子行程同時對
+# 同一個 adb server 講話，會讓 adb 的 client-server 協定被打斷（實測看到
+# 過「protocol fault (couldn't read status): connection reset」以及短暫
+# 多開出一個 adb.exe 又自己關掉），嚴重時連續逾時上看 90 秒。
+#
+# todo011-4 已經把背景輪詢整個拿掉（見 gui.py，U2 現在跟 WiFi/U1 一樣
+# standby 不做任何背景動作，狀態判斷全部挪到使用者按 START 那一刻的
+# connect() 一次性完成），這把鎖是額外的安全網：`disconnect()` 本身仍可能
+# 被兩個執行緒同時進入（StreamEngine.stop() 走主執行緒、StreamEngine._run()
+# 的重連迴圈走它自己的背景執行緒，兩者都會呼叫 transport.disconnect()，見
+# core/stream_engine.py），這把鎖確保即使真的同時被呼叫，實際送進 adb.exe
+# 的指令還是一個一個來，不會再重現上述協定被打斷的情況。
+_adb_cli_lock = threading.Lock()
+
 
 # ------------------------------------------------------------------ #
 # todo011-1 診斷 log（只加 log，不改行為/邏輯；比照 gui.py todo07-1 的
@@ -142,18 +159,19 @@ class AdbNotFoundError(TransportError):
 
 
 class AdbState(enum.Enum):
-    """todo011 §2：U2 前置狀態偵測——把 `adb devices` 的結果收斂成使用者
-    看得懂的三種狀態（跟手機端 log 顯示邏輯一一對應，見本檔 [probe_state]
-    docstring）。"""
+    """todo011 §2：把 `adb devices` 的結果收斂成使用者看得懂的三種狀態
+    （跟手機端 log 顯示邏輯一一對應）。todo011-4：原本供背景輪詢用的
+    [probe_state] 已移除（見本檔開頭 `_adb_cli_lock` 說明的根因分析），
+    現在只有 [UsbAdbTransport.connect] 在使用者按 START 的當下呼叫
+    [_classify_devices] 分類、決定要不要拋對應的錯誤訊息。"""
 
     NOT_FOUND = "not_found"  # 情況 1：完全沒偵測到裝置（含 adb 逾時/失敗，一律視同找不到）
     UNAUTHORIZED = "unauthorized"  # 情況 2：偵測到裝置但尚未在手機上按「允許」
     READY = "ready"  # 情況 3：至少一台已授權（state == "device"），可以連線
 
 
-# 跟 [AdbState] 三種狀態一一對應的使用者訊息，供 connect() 失敗路徑跟
-# [probe_state] 共用同一份文字，避免兩處各寫一次、日後改一邊漏改另一邊。
-# READY 沒有對應訊息：就緒不顯示警告（見 todo011 §2 一）。
+# 跟 [AdbState] 三種狀態一一對應的使用者訊息，[UsbAdbTransport.connect]
+# 失敗路徑用。READY 沒有對應訊息：就緒不顯示警告（見 todo011 §2 一）。
 _MSG_NOT_FOUND = "請確認手機已用 USB 連接電腦，並開啟「USB 偵錯」（開發人員選項）。"
 _MSG_UNAUTHORIZED = "請在手機上點擊「允許 USB 偵錯」的授權對話框（若沒跳出過，拔掉 USB 線重插一次）。"
 
@@ -169,75 +187,6 @@ def _classify_devices(devices: list[_AdbDevice]) -> AdbState:
     if any(d.state == "unauthorized" for d in devices):
         return AdbState.UNAUTHORIZED
     return AdbState.NOT_FOUND
-
-
-def probe_state(timeout: float = None) -> AdbState:
-    """todo011 §2：U2 前置狀態主動偵測——只查詢 `adb devices`、不建立任何
-    連線或 `adb reverse` 規則，供 GUI 每隔數秒呼叫一次、即時顯示對應提示
-    （見 pc/gui.py 的 U2 偵測輪詢）。
-
-    刻意跟 [UsbAdbTransport.connect] 分開、不管 adb server 生命週期收尾
-    （不呼叫 `adb kill-server`）：todo010-4 那個孤兒 adb.exe 問題的根因是
-    「建立過 `adb reverse` 規則、裝置後來斷線，殘留的規則讓 adb server
-    持續對著已消失的裝置跳警告」——這裡從頭到尾只讀 `adb devices`、從不
-    建立任何規則，就算持續呼叫這個函式順帶讓 adb server 保持啟動，也只是
-    等同使用者自己在命令列反覆打 `adb devices`，是 adb 本身的正常行為，
-    不會重現那個孤兒規則的情境，不需要特別收尾。"""
-    if timeout is None:
-        timeout = config.ADB_COMMAND_TIMEOUT_S
-    t0 = time.monotonic()  # 診斷用（todo011-1）
-    diag_snapshot("probe_state() 開始（U2 前置偵測輪詢）")
-    adb_path = _find_adb_executable()
-    if adb_path is None:
-        # 診斷用（todo011-1）
-        diag_snapshot(f"probe_state() 結束（耗時 {(time.monotonic() - t0) * 1000:.0f}ms，找不到 adb 執行檔）")
-        return AdbState.NOT_FOUND
-    try:
-        devices = _list_adb_devices(adb_path, timeout)
-    except TransportError as e:
-        logger.debug("probe_state(): %s（歸類為 not_found）", e)
-        # 診斷用（todo011-1）
-        diag_snapshot(
-            f"probe_state() 結束（耗時 {(time.monotonic() - t0) * 1000:.0f}ms，`adb devices` 失敗）"
-        )
-        return AdbState.NOT_FOUND
-    # 診斷用（todo011-1）
-    diag_snapshot(
-        f"probe_state() 結束（耗時 {(time.monotonic() - t0) * 1000:.0f}ms，取得 {len(devices)} 台裝置）"
-    )
-    return _classify_devices(devices)
-
-
-def is_adb_server_listening() -> bool:
-    """[_is_adb_server_listening] 的公開版本，供 gui.py 在啟動 U2 前置偵測
-    輪詢（[probe_state]）當下記一次「adb server 是不是已經在跑」，用來
-    判斷輪詢期間若順帶啟動了 server，那顆 server 是不是我們造成的（見
-    [kill_orphaned_probe_server] docstring）。"""
-    return _is_adb_server_listening()
-
-
-def kill_orphaned_probe_server() -> None:
-    """app 關閉時呼叫（見 pc/gui.py `_on_close`）：[probe_state] 只讀
-    `adb devices`、故意不管 adb server 生命週期（見 [probe_state]
-    docstring 的取捨），如果輪詢期間 adb server 原本沒在跑、是被我們的
-    `adb devices` 呼叫順帶啟動的，那顆常駐 adb.exe 在 app 關掉後不會有
-    任何人再收尾它，繼續對已斷線的裝置跳「已停止響應」警告（跟 todo010-4
-    修的孤兒 process 是同一種症狀，只是觸發路徑換成輪詢而不是 connect()）。
-
-    呼叫端（gui.py）只在「啟動輪詢當下用 [is_adb_server_listening] 探測到
-    尚未在跑」時才會呼叫這裡收尾——判斷原則、已知取捨都跟
-    [UsbAdbTransport._kill_adb_server_if_owned] 一致（見本檔開頭「adb
-    server 生命週期」說明），這裡不重複探測、直接關。"""
-    adb_path = _find_adb_executable()
-    if adb_path is None:
-        return
-    try:
-        _run_adb(adb_path, ["kill-server"], config.ADB_COMMAND_TIMEOUT_S)
-        logger.info("app 關閉：已結束 U2 前置偵測輪詢啟動的 adb server，不留孤兒 process")
-    except (subprocess.TimeoutExpired, OSError) as e:
-        # 跟 _kill_adb_server_if_owned() 同樣的考量：不該讓 _on_close() 拋
-        # 例外擋住 app 關閉，安全忽略即可（常見成因：裝置已拔線）。
-        logger.debug("app 關閉時結束 adb server 發生非致命錯誤（可忽略）: %s", e)
 
 
 def _adb_server_port() -> int:
@@ -282,13 +231,17 @@ def _find_adb_executable() -> Optional[str]:
 
 
 def _run_adb(adb_path: str, args: list[str], timeout: float) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        [adb_path, *args],
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        creationflags=_SUBPROCESS_CREATIONFLAGS,
-    )
+    # todo011-4：所有呼叫都走 `_adb_cli_lock`，見本檔開頭該鎖的說明——
+    # 確保就算兩個執行緒真的同時想對 adb 下指令，實際送進 adb.exe 的呼叫
+    # 還是序列化的，不會互相干擾 adb 的 client-server 協定。
+    with _adb_cli_lock:
+        return subprocess.run(
+            [adb_path, *args],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            creationflags=_SUBPROCESS_CREATIONFLAGS,
+        )
 
 
 def _list_adb_devices(adb_path: str, timeout: float) -> list[_AdbDevice]:
@@ -412,7 +365,7 @@ class UsbAdbTransport(Transport):
             if devices:
                 # 情況 1/2 的詳細裝置清單只寫進 log（供排查），使用者看到的
                 # 例外訊息統一用 _MSG_NOT_FOUND / _MSG_UNAUTHORIZED 兩句固定
-                # 文字（todo011 §2，跟 [probe_state] 共用同一份分類與文字）。
+                # 文字（todo011 §2 定的分類，見 [_classify_devices]）。
                 logger.info(
                     "adb 偵測到裝置但目前無法使用: %s",
                     "、".join(f"{d.serial}({d.state})" for d in devices),
